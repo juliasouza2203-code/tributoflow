@@ -20,7 +20,7 @@ const schema = z.object({
 type FormData = z.infer<typeof schema>
 
 export default function RegisterOffice() {
-  const { signUp, refreshProfile } = useAuth()
+  const { signUp, signIn, refreshProfile } = useAuth()
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
 
@@ -34,8 +34,9 @@ export default function RegisterOffice() {
       const { error } = await signUp(data.email, data.password, data.full_name)
       if (error) throw error
 
-      // Wait briefly for auth to settle then call setup RPC
-      await new Promise(r => setTimeout(r, 1000))
+      // Sign in immediately so auth.uid() is available for the RPC
+      const { error: signInError } = await signIn(data.email, data.password)
+      if (signInError) throw signInError
 
       const slug = data.office_name
         .toLowerCase()
