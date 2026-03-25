@@ -140,7 +140,7 @@ export default function AdminNcmDiagnostics() {
           value={isLoading ? '—' : diagnostics?.invalidNcm || 0}
           subtitle="Nao encontrado na tabela"
           icon={AlertTriangle}
-          variant={diagnostics?.invalidNcm ? 'destructive' : 'success'}
+          variant={diagnostics?.invalidNcm ? 'danger' : 'success'}
           loading={isLoading}
         />
         <KpiCardFiscal
