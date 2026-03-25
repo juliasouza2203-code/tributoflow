@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -9,28 +9,33 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from 'sonner'
-import { Tags, ChevronRight, CheckCircle } from 'lucide-react'
+import { Tags, ChevronRight, CheckCircle, Loader2, ExternalLink, AlertCircle, RefreshCw } from 'lucide-react'
+import { consultarNcmCff, type CffCard } from '@/integrations/fiscal/consulta-cff'
 
-// Fallback data used when the database tables are empty
-const CCLASSTRIB_FALLBACK = [
-  { code: '01', description: 'Tributação Normal (alíquota cheia)', regime_type: 'normal', p_red_ibs: 0, p_red_cbs: 0 },
-  { code: '02', description: 'Redução de 60% — Cesta Básica Ampliada', regime_type: 'reducao', p_red_ibs: 60, p_red_cbs: 60 },
-  { code: '03', description: 'Redução de 100% — Cesta Básica Nacional', regime_type: 'isenta', p_red_ibs: 100, p_red_cbs: 100 },
-  { code: '04', description: 'Redução de 30% — Saúde', regime_type: 'reducao', p_red_ibs: 30, p_red_cbs: 30 },
-  { code: '05', description: 'Redução de 40% — Educação', regime_type: 'reducao', p_red_ibs: 40, p_red_cbs: 40 },
-  { code: '06', description: 'Imune — Serviços Religiosos', regime_type: 'imune', p_red_ibs: 100, p_red_cbs: 100 },
-  { code: '07', description: 'Monofásico — Combustíveis', regime_type: 'monofasica', p_red_ibs: 0, p_red_cbs: 0 },
-]
-
-const CST_FALLBACK = [
-  { code: '01', description: 'Tributado integralmente' },
-  { code: '02', description: 'Tributado com redução de alíquota' },
-  { code: '03', description: 'Isento' },
-  { code: '04', description: 'Imune' },
-  { code: '05', description: 'Não tributado' },
-]
+// CST groups from LC 214/2025 — maps 3-digit prefix to label
+const CST_GROUP_LABELS: Record<string, string> = {
+  '000': 'Tributado integralmente (CST 000)',
+  '010': 'Tributado com crédito presumido (CST 010)',
+  '011': 'Tributado — regimes específicos (CST 011)',
+  '200': 'Redução de alíquota (CST 200)',
+  '220': 'Redução — regime específico (CST 220)',
+  '221': 'Redução — cooperativas (CST 221)',
+  '222': 'Redução — exportação (CST 222)',
+  '400': 'Isento (CST 400)',
+  '410': 'Isento — regimes específicos (CST 410)',
+  '510': 'Imune (CST 510)',
+  '515': 'Imune — regime específico (CST 515)',
+  '550': 'Não incide / fora do campo (CST 550)',
+  '620': 'Monofásico — tributado (CST 620)',
+  '800': 'Monofásico — isento (CST 800)',
+  '810': 'Monofásico — imune (CST 810)',
+  '811': 'Monofásico — regime específico (CST 811)',
+  '820': 'Monofásico — suspensão (CST 820)',
+  '830': 'Monofásico — diferido (CST 830)',
+}
 
 const schema = z.object({
   ncm_used: z.string().optional(),
@@ -48,35 +53,11 @@ export default function AdminClassification() {
   const [step, setStep] = useState(1)
   const [filterCompany, setFilterCompany] = useState('all')
 
-  // Fetch cClassTrib from database, fallback to hardcoded if table is empty
-  const { data: cclasstribOptions } = useQuery({
-    queryKey: ['tax-cclasstrib'],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from('tax_cclasstrib')
-        .select('code, description, regime_type, p_red_ibs, p_red_cbs')
-        .is('end_date', null)
-        .order('code')
-      return data && data.length > 0 ? data : CCLASSTRIB_FALLBACK
-    },
-    staleTime: 1000 * 60 * 60, // 1h cache
-  })
-
-  // Fetch CST from database, fallback to hardcoded if table is empty
-  const { data: cstOptions } = useQuery({
-    queryKey: ['tax-cst-ibs-cbs'],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from('tax_cst_ibs_cbs')
-        .select('code, description')
-        .order('code')
-      return data && data.length > 0 ? data : CST_FALLBACK
-    },
-    staleTime: 1000 * 60 * 60,
-  })
-
-  const CCLASSTRIB_OPTIONS = cclasstribOptions || CCLASSTRIB_FALLBACK
-  const CST_OPTIONS = cstOptions || CST_FALLBACK
+  // CFF portal data for step 3
+  const [cffCards, setCffCards] = useState<CffCard[]>([])
+  const [cffLoading, setCffLoading] = useState(false)
+  const [cffError, setCffError] = useState<string | null>(null)
+  const [confirmedNcm, setConfirmedNcm] = useState<string>('')
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
@@ -103,9 +84,61 @@ export default function AdminClassification() {
     enabled: !!officeId,
   })
 
-  const { register, handleSubmit, watch, reset, formState: { errors } } = useForm<FormData>({
+  const { register, handleSubmit, watch, reset, setValue, getValues, formState: { errors } } = useForm<FormData>({
     resolver: zodResolver(schema),
   })
+
+  const selectedCst = watch('cst_ibs_cbs')
+  const selectedCclass = watch('cclasstrib_code')
+
+  // Group CFF cards by CST prefix (first 3 digits of cclasstrib)
+  const groupedCards = cffCards.reduce<Record<string, CffCard[]>>((acc, card) => {
+    const cstKey = card.cst
+    if (!acc[cstKey]) acc[cstKey] = []
+    acc[cstKey].push(card)
+    return acc
+  }, {})
+
+  // Fetch CFF cards when entering step 3
+  async function fetchCffCards(ncm: string) {
+    if (!ncm || ncm.replace(/[.\-\s]/g, '').length < 4) {
+      setCffError('NCM inválido para consultar o portal CFF')
+      return
+    }
+    setCffLoading(true)
+    setCffError(null)
+    setCffCards([])
+    try {
+      const result = await consultarNcmCff(ncm)
+      if (result.error) throw new Error(result.error)
+      if (result.cards.length === 0) {
+        setCffError('Nenhuma classificação encontrada para este NCM no portal CFF.')
+      } else {
+        setCffCards(result.cards)
+      }
+    } catch (err: any) {
+      setCffError(err.message || 'Não foi possível consultar o portal CFF.')
+    }
+    setCffLoading(false)
+  }
+
+  // When a CFF card is clicked, set both cst and cclasstrib
+  function selectCffCard(card: CffCard) {
+    setValue('cst_ibs_cbs', card.cst)
+    setValue('cclasstrib_code', card.cclasstrib)
+  }
+
+  function goToStep2() {
+    const ncm = getValues('ncm_used') || selectedItem?.ncm_current || ''
+    setConfirmedNcm(ncm)
+    setStep(2)
+  }
+
+  function goToStep3() {
+    const ncm = confirmedNcm || getValues('ncm_used') || selectedItem?.ncm_current || ''
+    fetchCffCards(ncm)
+    setStep(3)
+  }
 
   const classifyMutation = useMutation({
     mutationFn: async (data: FormData) => {
@@ -123,7 +156,6 @@ export default function AdminClassification() {
         status: 'approved',
       })
       if (classErr) throw classErr
-
       const { error: itemErr } = await (supabase.from('items') as any).update({ status: 'classified' }).eq('id', selectedItem.id)
       if (itemErr) throw itemErr
     },
@@ -133,19 +165,17 @@ export default function AdminClassification() {
       toast.success('Item classificado com sucesso!')
       setSelectedItem(null)
       setStep(1)
+      setCffCards([])
       reset()
     },
     onError: () => toast.error('Erro ao classificar item'),
   })
 
-  const selectedCst = watch('cst_ibs_cbs')
-  const selectedCclass = watch('cclasstrib_code')
-
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Classificação Fiscal</h1>
-        <p className="text-gray-500 text-sm mt-1">CST + cClassTrib — LC 214/2025</p>
+        <p className="text-gray-500 text-sm mt-1">CST + cClassTrib — LC 214/2025 · Dados do Portal Conformidade Fácil (SVRS)</p>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-6">
@@ -178,7 +208,7 @@ export default function AdminClassification() {
               items?.map(item => (
                 <button
                   key={item.id}
-                  onClick={() => { setSelectedItem(item); setStep(1) }}
+                  onClick={() => { setSelectedItem(item); setStep(1); setCffCards([]); reset() }}
                   className={`w-full text-left p-4 border-b border-gray-100 hover:bg-blue-50 transition-colors ${selectedItem?.id === item.id ? 'bg-blue-50 border-l-2 border-l-blue-600' : ''}`}
                 >
                   <p className="text-sm font-medium text-gray-900 truncate">{item.description}</p>
@@ -208,7 +238,7 @@ export default function AdminClassification() {
                 {[1, 2, 3, 4].map(s => (
                   <div key={s} className={`flex items-center gap-1.5 text-sm ${step === s ? 'text-blue-600 font-semibold' : step > s ? 'text-green-600' : 'text-gray-400'}`}>
                     <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${step === s ? 'bg-blue-600 text-white' : step > s ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>{s}</div>
-                    <span className="hidden sm:inline">{['NCM/NBS', 'CST', 'cClassTrib', 'Justificativa'][s-1]}</span>
+                    <span className="hidden sm:inline">{['NCM/NBS', 'Contexto', 'cClassTrib', 'Justificativa'][s-1]}</span>
                   </div>
                 ))}
               </div>
@@ -224,69 +254,164 @@ export default function AdminClassification() {
                 {step === 1 && (
                   <div className="space-y-4">
                     <h3 className="font-semibold text-gray-900">Passo 1 — Confirmar NCM/NBS</h3>
+                    <p className="text-xs text-gray-500">O NCM será usado para consultar as classificações aplicáveis no Portal Conformidade Fácil.</p>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
                         <Label>NCM (mercadorias)</Label>
-                        <Input {...register('ncm_used')} defaultValue={selectedItem.ncm_current || ''} placeholder="0000.00.00" />
+                        <Input {...register('ncm_used')} defaultValue={selectedItem.ncm_current || ''} placeholder="00000000" />
                       </div>
                       <div className="space-y-1.5">
                         <Label>NBS (serviços)</Label>
                         <Input {...register('nbs_used')} defaultValue={selectedItem.nbs_code || ''} placeholder="1.01.01.10" />
                       </div>
                     </div>
-                    <Button type="button" onClick={() => setStep(2)}>Próximo</Button>
+                    <Button type="button" onClick={goToStep2}>Próximo</Button>
                   </div>
                 )}
 
-                {/* Step 2: CST */}
+                {/* Step 2: Document type / operation context */}
                 {step === 2 && (
                   <div className="space-y-4">
-                    <h3 className="font-semibold text-gray-900">Passo 2 — Selecionar CST IBS/CBS</h3>
-                    <div className="space-y-2">
-                      {CST_OPTIONS.map(cst => (
-                        <label key={cst.code} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${selectedCst === cst.code ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}>
-                          <input type="radio" {...register('cst_ibs_cbs')} value={cst.code} className="text-blue-600" />
-                          <div>
-                            <span className="font-mono text-xs text-gray-500 mr-2">{cst.code}</span>
-                            <span className="text-sm text-gray-900">{cst.description}</span>
-                          </div>
+                    <h3 className="font-semibold text-gray-900">Passo 2 — Tipo de Documento Fiscal</h3>
+                    <p className="text-xs text-gray-500">Selecione o tipo de documento. Isso filtra os cClassTrib aplicáveis no portal.</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        { value: 'NFE', label: 'NF-e', sub: 'Nota Fiscal Eletrônica' },
+                        { value: 'NFCE', label: 'NFC-e', sub: 'Nota Fiscal ao Consumidor' },
+                      ].map(opt => (
+                        <label key={opt.value} className="flex flex-col gap-1 p-4 rounded-lg border border-gray-200 hover:border-blue-400 hover:bg-blue-50 cursor-pointer transition-colors">
+                          <input type="radio" name="dfeType" value={opt.value} defaultChecked={opt.value === 'NFE'} className="sr-only" onChange={() => setValue('cst_ibs_cbs', '')} />
+                          <span className="font-semibold text-gray-900">{opt.label}</span>
+                          <span className="text-xs text-gray-500">{opt.sub}</span>
                         </label>
                       ))}
-                      {errors.cst_ibs_cbs && <p className="text-xs text-red-500">{errors.cst_ibs_cbs.message}</p>}
                     </div>
                     <div className="flex gap-2">
                       <Button type="button" variant="outline" onClick={() => setStep(1)}>Voltar</Button>
-                      <Button type="button" onClick={() => setStep(3)}>Próximo</Button>
+                      <Button type="button" onClick={goToStep3}>Consultar Portal CFF</Button>
                     </div>
                   </div>
                 )}
 
-                {/* Step 3: cClassTrib */}
+                {/* Step 3: cClassTrib from CFF portal */}
                 {step === 3 && (
                   <div className="space-y-4">
-                    <h3 className="font-semibold text-gray-900">Passo 3 — Selecionar cClassTrib</h3>
-                    <div className="space-y-2">
-                      {CCLASSTRIB_OPTIONS.map(cc => (
-                        <label key={cc.code} className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${selectedCclass === cc.code ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}>
-                          <input type="radio" {...register('cclasstrib_code')} value={cc.code} className="mt-0.5 text-blue-600" />
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-xs text-gray-500">{cc.code}</span>
-                              <span className="text-sm font-medium text-gray-900">{cc.description}</span>
-                            </div>
-                            {(cc.p_red_ibs > 0 || cc.p_red_cbs > 0) && (
-                              <p className="text-xs text-green-600 mt-0.5">
-                                Redução IBS: {cc.p_red_ibs}% | Redução CBS: {cc.p_red_cbs}%
-                              </p>
-                            )}
-                          </div>
-                        </label>
-                      ))}
-                      {errors.cclasstrib_code && <p className="text-xs text-red-500">{errors.cclasstrib_code.message}</p>}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="font-semibold text-gray-900">Passo 3 — Selecionar cClassTrib</h3>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Classificações do Portal Conformidade Fácil para NCM <code className="bg-gray-100 px-1 rounded font-mono">{confirmedNcm || selectedItem.ncm_current}</code>
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={`https://dfe-portal.svrs.rs.gov.br/CFF/ClassificacaoTributariaNcm?ncm=${(confirmedNcm || selectedItem.ncm_current || '').replace(/[.\-\s]/g,'')}&dfeTypes=NFE`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                        >
+                          <ExternalLink className="h-3 w-3" /> Ver no Portal
+                        </a>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => fetchCffCards(confirmedNcm || selectedItem.ncm_current || '')}
+                          disabled={cffLoading}
+                          className="h-7 gap-1 text-xs"
+                        >
+                          <RefreshCw className={`h-3 w-3 ${cffLoading ? 'animate-spin' : ''}`} />
+                          Atualizar
+                        </Button>
+                      </div>
                     </div>
+
+                    {/* Loading */}
+                    {cffLoading && (
+                      <div className="flex items-center justify-center py-12 gap-3 text-gray-500">
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span className="text-sm">Consultando Portal Conformidade Fácil…</span>
+                      </div>
+                    )}
+
+                    {/* Error */}
+                    {!cffLoading && cffError && (
+                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
+                        <AlertCircle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-sm font-medium text-amber-800">Erro ao consultar portal</p>
+                          <p className="text-xs text-amber-700 mt-1">{cffError}</p>
+                          <p className="text-xs text-amber-600 mt-2">Informe o cClassTrib manualmente ou acesse o portal diretamente.</p>
+                          <Input
+                            className="mt-2 h-8 text-xs font-mono w-40"
+                            placeholder="Ex: 000001"
+                            onChange={e => setValue('cclasstrib_code', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Cards from CFF portal */}
+                    {!cffLoading && cffCards.length > 0 && (
+                      <div className="space-y-4 max-h-[420px] overflow-y-auto pr-1">
+                        {Object.entries(groupedCards).map(([cst, cards]) => (
+                          <div key={cst}>
+                            <p className="text-xs font-semibold text-gray-500 uppercase mb-2 sticky top-0 bg-white py-1">
+                              {CST_GROUP_LABELS[cst] || `CST ${cst}`}
+                            </p>
+                            <div className="space-y-1.5">
+                              {cards.map(card => {
+                                const isSelected = selectedCclass === card.cclasstrib
+                                return (
+                                  <label
+                                    key={card.cclasstrib}
+                                    onClick={() => selectCffCard(card)}
+                                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${isSelected ? 'border-blue-600 bg-blue-50 shadow-sm' : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'}`}
+                                  >
+                                    <input
+                                      type="radio"
+                                      {...register('cclasstrib_code')}
+                                      value={card.cclasstrib}
+                                      checked={isSelected}
+                                      onChange={() => selectCffCard(card)}
+                                      className="mt-1 text-blue-600 shrink-0"
+                                    />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <code className="text-xs font-mono font-bold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
+                                          {card.cclasstrib}
+                                        </code>
+                                        {card.badge && (
+                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-gray-500">{card.badge}</Badge>
+                                        )}
+                                      </div>
+                                      <p className="text-xs text-gray-700 mt-1 leading-relaxed">{card.description}</p>
+                                      <a
+                                        href={card.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={e => e.stopPropagation()}
+                                        className="inline-flex items-center gap-1 text-[10px] text-blue-500 hover:underline mt-1"
+                                      >
+                                        <ExternalLink className="h-2.5 w-2.5" /> Ver no portal
+                                      </a>
+                                    </div>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {errors.cclasstrib_code && <p className="text-xs text-red-500">{errors.cclasstrib_code.message}</p>}
+
                     <div className="flex gap-2">
                       <Button type="button" variant="outline" onClick={() => setStep(2)}>Voltar</Button>
-                      <Button type="button" onClick={() => setStep(4)}>Próximo</Button>
+                      <Button type="button" onClick={() => setStep(4)} disabled={!selectedCclass}>
+                        Próximo
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -295,6 +420,13 @@ export default function AdminClassification() {
                 {step === 4 && (
                   <div className="space-y-4">
                     <h3 className="font-semibold text-gray-900">Passo 4 — Justificativa</h3>
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 space-y-1">
+                      <p><span className="font-semibold">CST:</span> {selectedCst || '—'}</p>
+                      <p><span className="font-semibold">cClassTrib:</span> {selectedCclass || '—'}</p>
+                      {cffCards.find(c => c.cclasstrib === selectedCclass) && (
+                        <p><span className="font-semibold">Descrição:</span> {cffCards.find(c => c.cclasstrib === selectedCclass)?.description}</p>
+                      )}
+                    </div>
                     <div className="space-y-1.5">
                       <Label>Justificativa da classificação *</Label>
                       <Textarea
