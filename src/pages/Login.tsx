@@ -34,7 +34,8 @@ export default function Login() {
       return
     }
     const from = (location.state as any)?.from?.pathname
-    navigate(from || (isOfficeStaff ? '/admin/dashboard' : '/empresa/dashboard'))
+    // Navigate to admin dashboard — ProtectedRoute will redirect to /empresa/dashboard if company_user only
+    navigate(from || '/admin/dashboard')
   }
 
   return (

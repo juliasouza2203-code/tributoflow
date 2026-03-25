@@ -21,6 +21,7 @@ interface AuthContextType {
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
   signUp: (email: string, password: string, fullName: string) => Promise<{ error: Error | null }>
   signOut: () => Promise<void>
+  refreshProfile: () => Promise<void>
   isOfficeStaff: boolean
   isCompanyUser: boolean
   isOfficeOwner: boolean
@@ -101,6 +102,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await supabase.auth.signOut()
   }
 
+  async function refreshProfile() {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (session?.user) await loadProfile(session.user.id)
+  }
+
   const isOfficeOwner = roles.includes('office_owner')
   const isOfficeStaff = roles.includes('office_staff') || isOfficeOwner
   const isCompanyUser = roles.includes('company_user')
@@ -108,7 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return (
     <AuthContext.Provider value={{
       session, user, profile, roles, officeId, loading,
-      signIn, signUp, signOut,
+      signIn, signUp, signOut, refreshProfile,
       isOfficeStaff, isCompanyUser, isOfficeOwner,
     }}>
       {children}

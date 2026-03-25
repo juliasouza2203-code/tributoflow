@@ -20,7 +20,7 @@ const schema = z.object({
 type FormData = z.infer<typeof schema>
 
 export default function RegisterOffice() {
-  const { signUp } = useAuth()
+  const { signUp, refreshProfile } = useAuth()
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
 
@@ -43,11 +43,16 @@ export default function RegisterOffice() {
         .replace(/[\u0300-\u036f]/g, '')
         .replace(/[^a-z0-9]+/g, '-')
 
-      await supabase.rpc('setup_new_office', {
+      const { error: rpcError } = await supabase.rpc('setup_new_office', {
         name: data.office_name,
         slug,
         cnpj: data.office_cnpj || undefined,
       } as any)
+
+      if (rpcError) throw rpcError
+
+      // Reload profile so AuthContext gets the new office_id and roles
+      await refreshProfile()
 
       toast.success('Escritório criado com sucesso! Trial de 7 dias ativo.')
       navigate('/admin/dashboard')
