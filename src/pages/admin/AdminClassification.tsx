@@ -13,8 +13,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner'
 import { Tags, ChevronRight, CheckCircle } from 'lucide-react'
 
-// cClassTrib seed data for demo
-const CCLASSTRIB_OPTIONS = [
+// Fallback data used when the database tables are empty
+const CCLASSTRIB_FALLBACK = [
   { code: '01', description: 'Tributação Normal (alíquota cheia)', regime_type: 'normal', p_red_ibs: 0, p_red_cbs: 0 },
   { code: '02', description: 'Redução de 60% — Cesta Básica Ampliada', regime_type: 'reducao', p_red_ibs: 60, p_red_cbs: 60 },
   { code: '03', description: 'Redução de 100% — Cesta Básica Nacional', regime_type: 'isenta', p_red_ibs: 100, p_red_cbs: 100 },
@@ -24,7 +24,7 @@ const CCLASSTRIB_OPTIONS = [
   { code: '07', description: 'Monofásico — Combustíveis', regime_type: 'monofasica', p_red_ibs: 0, p_red_cbs: 0 },
 ]
 
-const CST_OPTIONS = [
+const CST_FALLBACK = [
   { code: '01', description: 'Tributado integralmente' },
   { code: '02', description: 'Tributado com redução de alíquota' },
   { code: '03', description: 'Isento' },
@@ -47,6 +47,36 @@ export default function AdminClassification() {
   const [selectedItem, setSelectedItem] = useState<any>(null)
   const [step, setStep] = useState(1)
   const [filterCompany, setFilterCompany] = useState('all')
+
+  // Fetch cClassTrib from database, fallback to hardcoded if table is empty
+  const { data: cclasstribOptions } = useQuery({
+    queryKey: ['tax-cclasstrib'],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from('tax_cclasstrib')
+        .select('code, description, regime_type, p_red_ibs, p_red_cbs')
+        .is('end_date', null)
+        .order('code')
+      return data && data.length > 0 ? data : CCLASSTRIB_FALLBACK
+    },
+    staleTime: 1000 * 60 * 60, // 1h cache
+  })
+
+  // Fetch CST from database, fallback to hardcoded if table is empty
+  const { data: cstOptions } = useQuery({
+    queryKey: ['tax-cst-ibs-cbs'],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from('tax_cst_ibs_cbs')
+        .select('code, description')
+        .order('code')
+      return data && data.length > 0 ? data : CST_FALLBACK
+    },
+    staleTime: 1000 * 60 * 60,
+  })
+
+  const CCLASSTRIB_OPTIONS = cclasstribOptions || CCLASSTRIB_FALLBACK
+  const CST_OPTIONS = cstOptions || CST_FALLBACK
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],

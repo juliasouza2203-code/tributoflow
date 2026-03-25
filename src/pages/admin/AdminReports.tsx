@@ -9,9 +9,10 @@ import { FileText, Download } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
+import { generateClassificationReportPDF } from '@/lib/pdf/generateAuditReportPDF'
 
 export default function AdminReports() {
-  const { officeId } = useAuth()
+  const { officeId, profile } = useAuth()
   const [filterCompany, setFilterCompany] = useState('all')
 
   const { data: companies } = useQuery({
@@ -19,6 +20,15 @@ export default function AdminReports() {
     queryFn: async () => {
       const { data } = await supabase.from('client_companies').select('id, legal_name, trade_name').eq('office_id', officeId!) as any
       return (data as any[]) || []
+    },
+    enabled: !!officeId,
+  })
+
+  const { data: office } = useQuery({
+    queryKey: ['office', officeId],
+    queryFn: async () => {
+      const { data } = await supabase.from('offices').select('name').eq('id', officeId!).single()
+      return data
     },
     enabled: !!officeId,
   })
@@ -71,6 +81,33 @@ export default function AdminReports() {
     toast.success('Relatório exportado!')
   }
 
+  function exportPDF() {
+    if (!classifications?.length) return toast.info('Sem dados para exportar')
+    const rows = classifications.map((c: any) => ({
+      itemDescription: c.items?.description || '',
+      companyName: (c.client_companies as any)?.trade_name || (c.client_companies as any)?.legal_name || '',
+      ncmUsed: c.ncm_used || '',
+      cstCode: c.cst_ibs_cbs || '',
+      cclasstribCode: c.cclasstrib_code || '',
+      justification: c.justification || '',
+      responsavel: c.profiles?.full_name || '',
+      data: formatDate(c.created_at),
+      status: c.status,
+    }))
+
+    const selectedCompany = filterCompany !== 'all'
+      ? companies?.find(c => c.id === filterCompany)
+      : null
+
+    generateClassificationReportPDF({
+      officeName: office?.name || 'Escritório',
+      generatedBy: profile?.full_name || 'Usuário',
+      filterCompany: selectedCompany ? (selectedCompany.trade_name || selectedCompany.legal_name) : 'Todas',
+      classifications: rows,
+    })
+    toast.success('Laudo PDF gerado!')
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -78,9 +115,14 @@ export default function AdminReports() {
           <h1 className="text-2xl font-bold text-gray-900">Relatórios e Auditoria</h1>
           <p className="text-gray-500 text-sm mt-1">Histórico de classificações e trilha de auditoria</p>
         </div>
-        <Button variant="outline" onClick={exportClassifications} className="gap-2">
-          <Download className="h-4 w-4" /> Exportar Mapa
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={exportPDF} className="gap-2">
+            <FileText className="h-4 w-4" /> Exportar PDF
+          </Button>
+          <Button variant="outline" onClick={exportClassifications} className="gap-2">
+            <Download className="h-4 w-4" /> Exportar XLSX
+          </Button>
+        </div>
       </div>
 
       <div className="flex gap-3">

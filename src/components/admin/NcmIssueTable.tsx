@@ -22,9 +22,11 @@ interface NcmIssueTableProps {
   issues: NcmIssue[]
   loading?: boolean
   onSelectItem?: (itemId: string) => void
+  onSelectIssue?: (issue: NcmIssue) => void
+  selectedIssueId?: string | null
 }
 
-export function NcmIssueTable({ issues, loading, onSelectItem }: NcmIssueTableProps) {
+export function NcmIssueTable({ issues, loading, onSelectItem, onSelectIssue, selectedIssueId }: NcmIssueTableProps) {
   if (loading) {
     return (
       <div className="space-y-2">
@@ -60,8 +62,15 @@ export function NcmIssueTable({ issues, loading, onSelectItem }: NcmIssueTablePr
             return (
               <tr
                 key={issue.item_id}
-                className={cn('hover:bg-gray-50', onSelectItem && 'cursor-pointer')}
-                onClick={() => onSelectItem?.(issue.item_id)}
+                className={cn(
+                  'hover:bg-gray-50 transition-colors',
+                  (onSelectItem || onSelectIssue) && 'cursor-pointer',
+                  selectedIssueId === issue.item_id && 'bg-blue-50 border-l-2 border-l-blue-600',
+                )}
+                onClick={() => {
+                  onSelectItem?.(issue.item_id)
+                  onSelectIssue?.(issue)
+                }}
               >
                 <td className="py-3 px-4 text-gray-900 max-w-xs truncate">{issue.description}</td>
                 <td className="py-3 px-4 text-gray-600">{issue.company_name}</td>

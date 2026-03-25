@@ -5,7 +5,9 @@ import { useAuth } from '@/contexts/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { NcmIssueTable, type NcmIssue } from '@/components/admin/NcmIssueTable'
+import { NcmSuggestionPanel } from '@/components/admin/NcmSuggestionPanel'
 import { KpiCardFiscal } from '@/components/admin/KpiCardFiscal'
+import { validateNcm } from '@/lib/ncm-suggestion'
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, CheckCircle, Search, Download } from 'lucide-react'
 import { toast } from 'sonner'
@@ -14,6 +16,7 @@ import * as XLSX from 'xlsx'
 export default function AdminNcmDiagnostics() {
   const { officeId } = useAuth()
   const [filterCompany, setFilterCompany] = useState('all')
+  const [selectedIssue, setSelectedIssue] = useState<NcmIssue | null>(null)
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
@@ -46,7 +49,19 @@ export default function AdminNcmDiagnostics() {
           issues.push({ item_id: item.id, description: item.description, ncm_current: null, issue_type: 'missing_ncm', company_name: companyName })
         } else {
           withNcm.push(item)
-          valid.push(item)
+          // Validate NCM against official table
+          const validation = await validateNcm(item.ncm_current)
+          if (!validation.valid) {
+            issues.push({
+              item_id: item.id,
+              description: item.description,
+              ncm_current: item.ncm_current,
+              issue_type: validation.expired ? 'expired_ncm' : 'invalid_ncm',
+              company_name: companyName,
+            })
+          } else {
+            valid.push(item)
+          }
         }
       }
 
@@ -54,6 +69,7 @@ export default function AdminNcmDiagnostics() {
         issues,
         totalItems: all.length,
         withoutNcm: issues.filter(i => i.issue_type === 'missing_ncm').length,
+        invalidNcm: issues.filter(i => i.issue_type === 'invalid_ncm' || i.issue_type === 'expired_ncm').length,
         withNcm: withNcm.length,
         valid: valid.length,
       }
@@ -67,7 +83,7 @@ export default function AdminNcmDiagnostics() {
       'Empresa': i.company_name,
       'Descrição': i.description,
       'NCM Atual': i.ncm_current || '',
-      'Problema': i.issue_type === 'missing_ncm' ? 'Sem NCM' : 'NCM Inválido',
+      'Problema': i.issue_type === 'missing_ncm' ? 'Sem NCM' : i.issue_type === 'expired_ncm' ? 'NCM Vencido' : 'NCM Invalido',
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
     const wb = XLSX.utils.book_new()
@@ -104,7 +120,7 @@ export default function AdminNcmDiagnostics() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KpiCardFiscal
           title="Total de Itens"
           value={isLoading ? '—' : diagnostics?.totalItems || 0}
@@ -114,14 +130,22 @@ export default function AdminNcmDiagnostics() {
         <KpiCardFiscal
           title="Sem NCM"
           value={isLoading ? '—' : diagnostics?.withoutNcm || 0}
-          subtitle="Requerem ação"
+          subtitle="Requerem acao"
           icon={AlertTriangle}
           variant={diagnostics?.withoutNcm ? 'warning' : 'success'}
           loading={isLoading}
         />
         <KpiCardFiscal
-          title="Com NCM"
-          value={isLoading ? '—' : diagnostics?.withNcm || 0}
+          title="NCM Invalido"
+          value={isLoading ? '—' : diagnostics?.invalidNcm || 0}
+          subtitle="Nao encontrado na tabela"
+          icon={AlertTriangle}
+          variant={diagnostics?.invalidNcm ? 'destructive' : 'success'}
+          loading={isLoading}
+        />
+        <KpiCardFiscal
+          title="NCM Valido"
+          value={isLoading ? '—' : diagnostics?.valid || 0}
           icon={CheckCircle}
           variant="success"
           loading={isLoading}
@@ -129,11 +153,11 @@ export default function AdminNcmDiagnostics() {
         <KpiCardFiscal
           title="Taxa de Cobertura"
           value={isLoading ? '—' : diagnostics?.totalItems
-            ? `${Math.round((diagnostics.withNcm / diagnostics.totalItems) * 100)}%`
+            ? `${Math.round(((diagnostics.valid || 0) / diagnostics.totalItems) * 100)}%`
             : '0%'}
-          subtitle="NCM informado"
+          subtitle="NCM valido"
           icon={CheckCircle}
-          variant={diagnostics?.withoutNcm === 0 ? 'success' : 'default'}
+          variant={diagnostics?.withoutNcm === 0 && diagnostics?.invalidNcm === 0 ? 'success' : 'default'}
           loading={isLoading}
         />
       </div>
@@ -142,18 +166,33 @@ export default function AdminNcmDiagnostics() {
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
         <div className="flex items-center justify-between p-5 border-b border-gray-200">
           <div className="flex items-center gap-2">
-            <h3 className="font-semibold text-gray-900">Itens com Pendência</h3>
-            {diagnostics?.withoutNcm ? (
-              <Badge variant="warning">{diagnostics.withoutNcm}</Badge>
+            <h3 className="font-semibold text-gray-900">Itens com Pendencia</h3>
+            {(diagnostics?.issues?.length || 0) > 0 ? (
+              <Badge variant="warning">{diagnostics!.issues.length}</Badge>
             ) : (
               <Badge variant="success">OK</Badge>
             )}
           </div>
         </div>
         <div className="p-5">
-          <NcmIssueTable issues={diagnostics?.issues || []} loading={isLoading} />
+          <NcmIssueTable
+            issues={diagnostics?.issues || []}
+            loading={isLoading}
+            onSelectIssue={(issue) => setSelectedIssue(issue)}
+            selectedIssueId={selectedIssue?.item_id}
+          />
         </div>
       </div>
+
+      {/* NCM Suggestion Panel */}
+      <NcmSuggestionPanel
+        itemDescription={selectedIssue?.description}
+        currentNcm={selectedIssue?.ncm_current}
+        onSelectNcm={(code) => {
+          toast.success(`NCM ${code} selecionado para "${selectedIssue?.description}"`)
+          // In a full implementation, this would update the item's ncm_current
+        }}
+      />
     </div>
   )
 }

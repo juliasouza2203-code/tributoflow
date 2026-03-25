@@ -205,6 +205,37 @@ export interface Database {
         Insert: Omit<Database['public']['Tables']['audit_logs']['Row'], 'id' | 'created_at'>
         Update: Partial<Database['public']['Tables']['audit_logs']['Insert']>
       }
+      office_integrations: {
+        Row: {
+          id: string
+          office_id: string
+          provider: string
+          display_name: string
+          api_url: string | null
+          api_key: string | null
+          is_active: boolean
+          last_sync_at: string | null
+          config: Json
+          created_at: string
+          updated_at: string
+        }
+        Insert: Omit<Database['public']['Tables']['office_integrations']['Row'], 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Database['public']['Tables']['office_integrations']['Insert']>
+      }
+      office_fiscal_params: {
+        Row: {
+          id: string
+          office_id: string
+          ibs_state: number
+          ibs_municipal: number
+          cbs: number
+          default_markup: number
+          legacy_tax_rate: number
+          updated_at: string
+        }
+        Insert: Omit<Database['public']['Tables']['office_fiscal_params']['Row'], 'id' | 'updated_at'>
+        Update: Partial<Database['public']['Tables']['office_fiscal_params']['Insert']>
+      }
     }
     Functions: {
       get_my_office_id: { Args: Record<never, never>; Returns: string }
