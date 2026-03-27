@@ -3,7 +3,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/integrations/supabase/client'
 import { useAuth } from '@/contexts/AuthContext'
-import { classifyNcmWithAI, suggestNcm, type NcmSuggestion, type NcmConfidence } from '@/lib/ncm-suggestion'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -16,41 +15,35 @@ import {
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────
-interface XlsxRow {
-  description: string
-  price?: number
-  unit?: string
-  rawRow: Record<string, unknown>
-}
+type NcmConfidence = 'high' | 'medium' | 'low' | 'none'
 
 interface ImportRow {
   id: string
   description: string
+  ncmCode: string      // vem da planilha
   price?: number
-  unit?: string
-  // NCM
-  ncmCode: string
-  ncmDescription: string
+  // cClassTrib resultado
+  cClassTrib: string
+  cClassTribDesc: string
+  cst: string
+  regime: string
+  pRedIbs: number
+  pRedCbs: number
   confidence: NcmConfidence
-  allOptions: NcmSuggestion[]
   reasoning: string
   usedAI: boolean
   fromCache: boolean
-  // State
+  // estado
   status: 'pending' | 'processing' | 'done' | 'error'
   included: boolean
-  searchOpen: boolean
-  searchQuery: string
-  searchResults: NcmSuggestion[]
-  searchLoading: boolean
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
 const CONFIDENCE_META: Record<NcmConfidence, { label: string; color: string; icon: typeof CheckCircle }> = {
-  high:   { label: 'Alta',   color: 'bg-green-100 text-green-700 border-green-200', icon: CheckCircle },
+  high:   { label: 'Alta',   color: 'bg-green-100 text-green-700 border-green-200',   icon: CheckCircle },
   medium: { label: 'Média',  color: 'bg-yellow-100 text-yellow-700 border-yellow-200', icon: AlertTriangle },
   low:    { label: 'Baixa',  color: 'bg-orange-100 text-orange-700 border-orange-200', icon: AlertTriangle },
-  none:   { label: 'Nenhum', color: 'bg-red-100 text-red-700 border-red-200', icon: XCircle },
+  none:   { label: 'Nenhum', color: 'bg-red-100 text-red-700 border-red-200',          icon: XCircle },
 }
 
 function detectDescriptionColumn(headers: string[]): string | null {
@@ -61,6 +54,16 @@ function detectDescriptionColumn(headers: string[]): string | null {
     if (found) return found.h
   }
   return headers[0] || null
+}
+
+function detectNcmColumn(headers: string[]): string | null {
+  const candidates = ['ncm', 'codigo ncm', 'cod ncm', 'ncm_code', 'ncmcode', 'codigoncm', 'cod_ncm']
+  const lower = headers.map(h => ({ h, l: h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '') }))
+  for (const cand of candidates) {
+    const found = lower.find(({ l }) => l.includes(cand.replace(/\s+/g, '')))
+    if (found) return found.h
+  }
+  return null
 }
 
 function detectPriceColumn(headers: string[]): string | null {
@@ -74,7 +77,7 @@ function detectPriceColumn(headers: string[]): string | null {
 }
 
 // Process in parallel batches
-async function processBatch<T, R>(items: T[], fn: (item: T) => Promise<R>, batchSize = 5): Promise<R[]> {
+async function processBatch<T, R>(items: T[], fn: (item: T) => Promise<R>, batchSize = 6): Promise<R[]> {
   const results: R[] = []
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize)
@@ -82,6 +85,82 @@ async function processBatch<T, R>(items: T[], fn: (item: T) => Promise<R>, batch
     results.push(...batchResults)
   }
   return results
+}
+
+// Normalize NCM code to 8 digits (remove dots, spaces, pad)
+function normalizeNcm(raw: unknown): string {
+  if (raw == null) return ''
+  const s = String(raw).replace(/[\.\s\-]/g, '').trim()
+  // If it's numeric-ish and shorter than 8 digits, left-pad with zeros
+  if (/^\d+$/.test(s) && s.length < 8) return s.padStart(8, '0')
+  return s
+}
+
+// ── Classification function (calls Edge Function) ─────────────────
+async function classifyCClassTrib(
+  description: string,
+  ncmCode: string,
+): Promise<{
+  cClassTrib: string
+  cClassTribDesc: string
+  cst: string
+  regime: string
+  pRedIbs: number
+  pRedCbs: number
+  confidence: NcmConfidence
+  reasoning: string
+  usedAI: boolean
+  fromCache: boolean
+}> {
+  // 1. Busca candidatos na tax_cclasstrib (todos os registros ativos — lista pequena ~154)
+  const { data: allCClassTribs } = await supabase
+    .from('tax_cclasstrib')
+    .select('code, description, regime_type, p_red_ibs, p_red_cbs')
+    .is('end_date', null)
+    .order('code')
+
+  const candidates = (allCClassTribs || []).map(c => ({
+    code: c.code,
+    description: c.description,
+    cst: (c.code as string).substring(0, 3),
+    regime: c.regime_type,
+    p_red_ibs: c.p_red_ibs,
+    p_red_cbs: c.p_red_cbs,
+  }))
+
+  try {
+    const { data, error } = await supabase.functions.invoke('classify-cclasstrib', {
+      body: { description, ncmCode, candidates },
+    })
+    if (error || !data?.code) throw new Error(error?.message || 'No result from Edge Function')
+    return {
+      cClassTrib: data.code,
+      cClassTribDesc: data.description || '',
+      cst: data.cstCode || (data.code as string).substring(0, 3),
+      regime: data.regime || '',
+      pRedIbs: data.pRedIbs || 0,
+      pRedCbs: data.pRedCbs || 0,
+      confidence: (data.confidence as NcmConfidence) || 'none',
+      reasoning: data.reasoning || '',
+      usedAI: true,
+      fromCache: data.fromCache || false,
+    }
+  } catch {
+    // Fallback: código 000001 = tributação normal, ou o primeiro da lista
+    const fallback = candidates.find(c => c.code === '000001') || candidates[0]
+    return {
+      cClassTrib: fallback?.code || '',
+      cClassTribDesc: fallback?.description || '',
+      cst: fallback?.cst || '',
+      regime: fallback?.regime || '',
+      pRedIbs: fallback?.p_red_ibs || 0,
+      pRedCbs: fallback?.p_red_cbs || 0,
+      confidence: 'low',
+      reasoning: 'Classificação automática indisponível. Verificar manualmente.',
+      usedAI: false,
+      fromCache: false,
+    }
+  }
 }
 
 // ── Main Component ────────────────────────────────────────────────
@@ -98,12 +177,16 @@ export default function AdminNcmImport() {
   const [xlsxHeaders, setXlsxHeaders] = useState<string[]>([])
   const [xlsxRaw, setXlsxRaw] = useState<Record<string, unknown>[]>([])
   const [descCol, setDescCol] = useState('')
+  const [ncmCol, setNcmCol] = useState('')
   const [priceCol, setPriceCol] = useState('__none__')
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
     queryFn: async () => {
-      const { data } = await supabase.from('client_companies').select('id, legal_name, trade_name').eq('office_id', officeId!) as any
+      const { data } = await supabase
+        .from('client_companies')
+        .select('id, legal_name, trade_name')
+        .eq('office_id', officeId!) as any
       return (data as any[]) || []
     },
     enabled: !!officeId,
@@ -131,8 +214,10 @@ export default function AdminNcmImport() {
         setXlsxRaw(jsonData)
 
         const detectedDesc = detectDescriptionColumn(headers)
+        const detectedNcm = detectNcmColumn(headers)
         const detectedPrice = detectPriceColumn(headers)
         setDescCol(detectedDesc || '')
+        setNcmCol(detectedNcm || '')
         setPriceCol(detectedPrice || '__none__')
         setStep('mapping')
         toast.success(`${jsonData.length} linhas detectadas`)
@@ -155,29 +240,31 @@ export default function AdminNcmImport() {
     if (file) parseFile(file)
   }
 
-  // ── Process: run NCM suggestion for all rows ──────────────────
+  // ── Process: classify cClassTrib for all rows ─────────────────
   async function handleProcess() {
     if (!descCol) return toast.error('Selecione a coluna de descrição')
+    if (!ncmCol) return toast.error('Selecione a coluna de NCM')
     if (!companyId) return toast.error('Selecione a empresa')
 
     const initialRows: ImportRow[] = xlsxRaw.map((raw, idx) => ({
       id: `row-${idx}`,
       description: String(raw[descCol] || '').trim(),
-      price: (priceCol && priceCol !== '__none__') ? parseFloat(String(raw[priceCol] || '0')) || undefined : undefined,
+      ncmCode: normalizeNcm(raw[ncmCol]),
+      price: (priceCol && priceCol !== '__none__')
+        ? parseFloat(String(raw[priceCol] || '0')) || undefined
+        : undefined,
+      cClassTrib: '',
+      cClassTribDesc: '',
+      cst: '',
+      regime: '',
+      pRedIbs: 0,
+      pRedCbs: 0,
+      confidence: 'none' as NcmConfidence,
       reasoning: '',
       usedAI: false,
       fromCache: false,
-      unit: undefined,
-      ncmCode: '',
-      ncmDescription: '',
-      confidence: 'none' as NcmConfidence,
-      allOptions: [],
       status: 'pending' as const,
       included: true,
-      searchOpen: false,
-      searchQuery: '',
-      searchResults: [],
-      searchLoading: false,
     })).filter(r => r.description.length > 2)
 
     setRows(initialRows)
@@ -192,20 +279,19 @@ export default function AdminNcmImport() {
         initialRows,
         async (row) => {
           try {
-            const match = await classifyNcmWithAI(row.description)
-            const safeConfidence: NcmConfidence =
-              (match.confidence && match.confidence in CONFIDENCE_META)
-                ? match.confidence
-                : 'none'
+            const result = await classifyCClassTrib(row.description, row.ncmCode)
             setRows(prev => prev.map(r => r.id !== row.id ? r : {
               ...r,
-              ncmCode: match.suggestion?.code || '',
-              ncmDescription: match.suggestion?.description || '',
-              confidence: safeConfidence,
-              allOptions: match.allSuggestions ?? [],
-              reasoning: match.reasoning || '',
-              usedAI: match.usedAI ?? false,
-              fromCache: match.fromCache ?? false,
+              cClassTrib: result.cClassTrib,
+              cClassTribDesc: result.cClassTribDesc,
+              cst: result.cst,
+              regime: result.regime,
+              pRedIbs: result.pRedIbs,
+              pRedCbs: result.pRedCbs,
+              confidence: result.confidence,
+              reasoning: result.reasoning,
+              usedAI: result.usedAI,
+              fromCache: result.fromCache,
               status: 'done' as const,
             }))
           } catch {
@@ -221,7 +307,7 @@ export default function AdminNcmImport() {
         },
         6,
       )
-      toast.success('Classificação concluída!')
+      toast.success('Classificação cClassTrib concluída!')
     } catch (err: any) {
       toast.error('Erro durante classificação: ' + (err?.message || 'tente novamente'))
     } finally {
@@ -229,55 +315,24 @@ export default function AdminNcmImport() {
     }
   }
 
-  // ── Inline NCM search ─────────────────────────────────────────
-  const handleSearch = useCallback(async (rowId: string, query: string) => {
-    setRows(prev => prev.map(r => r.id !== rowId ? r : { ...r, searchQuery: query, searchLoading: true }))
-    try {
-      const results = await suggestNcm(query, 8)
-      setRows(prev => prev.map(r => r.id !== rowId ? r : { ...r, searchResults: results, searchLoading: false }))
-    } catch {
-      setRows(prev => prev.map(r => r.id !== rowId ? r : { ...r, searchLoading: false }))
-    }
-  }, [])
-
-  function selectNcm(rowId: string, suggestion: NcmSuggestion) {
-    setRows(prev => prev.map(r => r.id !== rowId ? r : {
-      ...r,
-      ncmCode: suggestion.code,
-      ncmDescription: suggestion.description,
-      confidence: 'high',
-      searchOpen: false,
-      searchQuery: '',
-      searchResults: [],
-    }))
-  }
-
   function toggleIncluded(rowId: string) {
     setRows(prev => prev.map(r => r.id !== rowId ? r : { ...r, included: !r.included }))
-  }
-
-  function toggleSearch(rowId: string) {
-    setRows(prev => prev.map(r => r.id !== rowId ? r : {
-      ...r,
-      searchOpen: !r.searchOpen,
-      searchQuery: r.searchOpen ? '' : r.description,
-      searchResults: r.searchOpen ? [] : r.allOptions,
-    }))
   }
 
   // ── Import to DB ──────────────────────────────────────────────
   const importMutation = useMutation({
     mutationFn: async () => {
-      const toImport = rows.filter(r => r.included && r.ncmCode)
-      if (toImport.length === 0) throw new Error('Nenhum item com NCM para importar')
+      const toImport = rows.filter(r => r.included)
+      if (toImport.length === 0) throw new Error('Nenhum item selecionado para importar')
 
       const records = toImport.map(r => ({
         office_id: officeId!,
         company_id: companyId,
         description: r.description,
         ncm_current: r.ncmCode,
+        cclasstrib_code: r.cClassTrib || null,
         base_cost: r.price || null,
-        status: 'pending',
+        status: 'classified',
         created_by: user!.id,
       }))
 
@@ -289,7 +344,7 @@ export default function AdminNcmImport() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['items'] })
-      toast.success(`${rows.filter(r => r.included && r.ncmCode).length} itens importados com sucesso!`)
+      toast.success(`${rows.filter(r => r.included).length} itens importados com sucesso!`)
       setStep('upload')
       setRows([])
       setXlsxRaw([])
@@ -300,9 +355,9 @@ export default function AdminNcmImport() {
   // ── Export template ───────────────────────────────────────────
   function downloadTemplate() {
     const ws = XLSX.utils.json_to_sheet([
-      { Descricao: 'Arroz branco polido tipo 1', Preco: 5.90 },
-      { Descricao: 'Notebook Dell 15 i7', Preco: 3500.00 },
-      { Descricao: 'Servico de consultoria em TI', Preco: 200.00 },
+      { Descricao: 'Arroz branco polido tipo 1', NCM: '10063021', Preco: 5.90 },
+      { Descricao: 'Notebook Dell 15 i7', NCM: '84713012', Preco: 3500.00 },
+      { Descricao: 'Feijao carioca tipo 1 1kg', NCM: '07133310', Preco: 8.50 },
     ])
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Produtos')
@@ -315,7 +370,6 @@ export default function AdminNcmImport() {
     high: rows.filter(r => r.included && r.confidence === 'high').length,
     medium: rows.filter(r => r.included && r.confidence === 'medium').length,
     low: rows.filter(r => r.included && (r.confidence === 'low' || r.confidence === 'none')).length,
-    noNcm: rows.filter(r => r.included && !r.ncmCode).length,
   }
 
   return (
@@ -325,10 +379,12 @@ export default function AdminNcmImport() {
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
             Importar Produtos via Planilha
             <span className="inline-flex items-center gap-1 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">
-              <Sparkles className="h-3 w-3" /> IA
+              <Sparkles className="h-3 w-3" /> IA LC 214/2025
             </span>
           </h1>
-          <p className="text-gray-500 text-sm mt-1">NCM classificado automaticamente por Claude Haiku — com raciocínio explicado</p>
+          <p className="text-gray-500 text-sm mt-1">
+            NCM vem da planilha — cClassTrib IBS/CBS classificado automaticamente por Claude Haiku
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={downloadTemplate} className="gap-2">
           <Download className="h-4 w-4" /> Baixar Modelo
@@ -342,7 +398,7 @@ export default function AdminNcmImport() {
             <div className={cn(
               'w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold',
               step === s ? 'bg-blue-600 text-white' :
-              ((['upload', 'mapping', 'results'].indexOf(step) > i) ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500')
+              (['upload', 'mapping', 'results'].indexOf(step) > i ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500')
             )}>{i + 1}</div>
             <span className={cn('text-sm', step === s ? 'font-semibold text-gray-900' : 'text-gray-500')}>
               {['Upload', 'Colunas', 'Revisão'][i]}
@@ -365,7 +421,10 @@ export default function AdminNcmImport() {
         >
           <FileSpreadsheet className="h-12 w-12 text-gray-400 mx-auto mb-4" />
           <p className="text-lg font-semibold text-gray-700">Arraste a planilha aqui</p>
-          <p className="text-sm text-gray-500 mt-1 mb-6">Suporta .xlsx, .xls e .csv</p>
+          <p className="text-sm text-gray-500 mt-1 mb-2">Suporta .xlsx, .xls e .csv</p>
+          <p className="text-xs text-gray-400 mb-6">
+            A planilha deve conter colunas de <strong>Descrição</strong> e <strong>NCM</strong> (código de 8 dígitos)
+          </p>
           <Button onClick={() => fileInputRef.current?.click()} className="gap-2">
             <Upload className="h-4 w-4" /> Selecionar Arquivo
           </Button>
@@ -379,10 +438,10 @@ export default function AdminNcmImport() {
           <h2 className="font-semibold text-gray-900">Mapeamento de Colunas</h2>
           <p className="text-sm text-gray-500">
             Planilha com <strong>{xlsxRaw.length} linhas</strong> e {xlsxHeaders.length} colunas.
-            Confirme o mapeamento abaixo.
+            O sistema usará o NCM da planilha e classificará o cClassTrib automaticamente via IA.
           </p>
 
-          <div className="grid md:grid-cols-3 gap-4">
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium text-gray-700">Empresa *</label>
               <Select value={companyId} onValueChange={setCompanyId}>
@@ -410,6 +469,18 @@ export default function AdminNcmImport() {
             </div>
 
             <div className="space-y-2">
+              <label className="text-sm font-medium text-gray-700">Coluna: NCM *</label>
+              <Select value={ncmCol} onValueChange={setNcmCol}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecionar coluna..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {xlsxHeaders.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
               <label className="text-sm font-medium text-gray-700">Coluna: Preço (opcional)</label>
               <Select value={priceCol} onValueChange={setPriceCol}>
                 <SelectTrigger>
@@ -424,17 +495,35 @@ export default function AdminNcmImport() {
           </div>
 
           {/* Preview */}
-          {descCol && (
+          {descCol && ncmCol && (
             <div className="rounded-lg border border-gray-200 overflow-hidden">
               <div className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-500 uppercase">
                 Prévia (primeiras 5 linhas)
               </div>
               <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">Descrição</th>
+                    <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">NCM</th>
+                    {priceCol && priceCol !== '__none__' && (
+                      <th className="px-4 py-2 text-right text-xs text-gray-500 font-medium">Preço</th>
+                    )}
+                  </tr>
+                </thead>
                 <tbody className="divide-y divide-gray-100">
                   {xlsxRaw.slice(0, 5).map((row, i) => (
                     <tr key={i}>
                       <td className="px-4 py-2 text-gray-600">{String(row[descCol] || '')}</td>
-                      {priceCol && <td className="px-4 py-2 text-gray-400 text-right font-mono">{String(row[priceCol] || '')}</td>}
+                      <td className="px-4 py-2">
+                        <code className="text-xs font-mono bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded">
+                          {normalizeNcm(row[ncmCol]) || '—'}
+                        </code>
+                      </td>
+                      {priceCol && priceCol !== '__none__' && (
+                        <td className="px-4 py-2 text-gray-400 text-right font-mono text-xs">
+                          {String(row[priceCol] || '')}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -446,11 +535,11 @@ export default function AdminNcmImport() {
             <Button variant="outline" onClick={() => setStep('upload')}>Voltar</Button>
             <Button
               onClick={handleProcess}
-              disabled={!descCol || !companyId}
+              disabled={!descCol || !ncmCol || !companyId}
               className="gap-2"
             >
-              <Search className="h-4 w-4" />
-              Classificar {xlsxRaw.length} produtos automaticamente
+              <Sparkles className="h-4 w-4" />
+              Classificar cClassTrib em {xlsxRaw.length} produtos
             </Button>
           </div>
         </div>
@@ -463,7 +552,10 @@ export default function AdminNcmImport() {
           {processing && (
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-gray-700">Classificando produtos…</span>
+                <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                  Classificando cClassTrib via IA (LC 214/2025)…
+                </span>
                 <span className="text-sm text-gray-500">{progress}%</span>
               </div>
               <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -479,10 +571,10 @@ export default function AdminNcmImport() {
           {!processing && rows.length > 0 && (
             <div className="grid grid-cols-4 gap-3">
               {[
-                { label: 'Total incluídos', value: stats.total, color: 'text-gray-900' },
-                { label: 'Alta confiança', value: stats.high, color: 'text-green-600' },
-                { label: 'Média confiança', value: stats.medium, color: 'text-yellow-600' },
-                { label: 'Baixa / sem NCM', value: stats.low, color: 'text-red-600' },
+                { label: 'Total incluídos',   value: stats.total,  color: 'text-gray-900' },
+                { label: 'Alta confiança',    value: stats.high,   color: 'text-green-600' },
+                { label: 'Média confiança',   value: stats.medium, color: 'text-yellow-600' },
+                { label: 'Baixa / nenhuma',   value: stats.low,    color: 'text-red-600' },
               ].map(s => (
                 <div key={s.label} className="bg-white rounded-lg border border-gray-200 p-4 text-center shadow-sm">
                   <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
@@ -494,131 +586,157 @@ export default function AdminNcmImport() {
 
           {/* Table */}
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+              <table className="w-full text-sm min-w-[1100px]">
                 <thead className="sticky top-0 bg-gray-50 z-10">
                   <tr className="border-b border-gray-200">
                     <th className="py-3 px-3 w-8">
                       <input
                         type="checkbox"
-                        checked={rows.every(r => r.included)}
+                        checked={rows.length > 0 && rows.every(r => r.included)}
                         onChange={e => setRows(prev => prev.map(r => ({ ...r, included: e.target.checked })))}
                         className="rounded"
                       />
                     </th>
-                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase">Descrição</th>
-                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase w-36">NCM Sugerido</th>
-                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase">Descrição NCM + Raciocínio</th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase min-w-[200px]">Descrição</th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase w-28">NCM (planilha)</th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase w-32">cClassTrib</th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase w-16">CST</th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase w-36">Regime</th>
+                    <th className="py-3 px-3 text-center text-xs font-semibold text-gray-500 uppercase w-28">Red.IBS/CBS</th>
                     <th className="py-3 px-3 text-center text-xs font-semibold text-gray-500 uppercase w-28">Confiança</th>
-                    <th className="py-3 px-3 w-16"></th>
+                    <th className="py-3 px-3 text-left text-xs font-semibold text-gray-500 uppercase min-w-[200px]">Raciocínio</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {rows.map(row => {
                     const meta = CONFIDENCE_META[row.confidence] ?? CONFIDENCE_META.none
                     const ConfIcon = meta.icon
+                    const isPending = row.status === 'processing' || (processing && row.status === 'pending')
                     return (
-                      <React.Fragment key={row.id}>
-                        <tr className={cn('hover:bg-gray-50', !row.included && 'opacity-40')}>
-                          <td className="py-2.5 px-3">
-                            <input
-                              type="checkbox"
-                              checked={row.included}
-                              onChange={() => toggleIncluded(row.id)}
-                              className="rounded"
-                            />
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <p className="text-gray-900 font-medium">{row.description}</p>
-                            {row.price && <p className="text-xs text-gray-400 font-mono">R$ {row.price.toFixed(2)}</p>}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            {row.status === 'processing' || (processing && row.status === 'pending') ? (
-                              <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
-                            ) : (
+                      <tr key={row.id} className={cn('hover:bg-gray-50', !row.included && 'opacity-40')}>
+                        {/* Checkbox */}
+                        <td className="py-2.5 px-3">
+                          <input
+                            type="checkbox"
+                            checked={row.included}
+                            onChange={() => toggleIncluded(row.id)}
+                            className="rounded"
+                          />
+                        </td>
+
+                        {/* Descrição */}
+                        <td className="py-2.5 px-3">
+                          <p className="text-gray-900 font-medium leading-snug">{row.description}</p>
+                          {row.price != null && (
+                            <p className="text-xs text-gray-400 font-mono">R$ {row.price.toFixed(2)}</p>
+                          )}
+                        </td>
+
+                        {/* NCM da planilha */}
+                        <td className="py-2.5 px-3">
+                          <code className={cn(
+                            'text-xs font-mono font-bold px-2 py-0.5 rounded',
+                            row.ncmCode ? 'bg-gray-100 text-gray-700' : 'bg-red-50 text-red-400'
+                          )}>
+                            {row.ncmCode || '—'}
+                          </code>
+                        </td>
+
+                        {/* cClassTrib */}
+                        <td className="py-2.5 px-3">
+                          {isPending ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+                          ) : (
+                            <div>
                               <code className={cn(
                                 'text-xs font-mono font-bold px-2 py-0.5 rounded',
-                                row.ncmCode ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-400'
+                                row.cClassTrib ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-400'
                               )}>
-                                {row.ncmCode || '—'}
+                                {row.cClassTrib || '—'}
                               </code>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 max-w-sm">
-                            <p className="text-xs text-gray-700 font-medium truncate">{row.ncmDescription || '—'}</p>
-                            {row.reasoning && (
-                              <p className="text-xs text-gray-400 mt-0.5 line-clamp-2 italic">
-                                {row.usedAI && <span className="text-blue-500 not-italic font-medium mr-1">✦IA:</span>}
-                                {row.reasoning}
-                                {row.fromCache && <span className="text-gray-300 ml-1">(cache)</span>}
+                              {row.cClassTribDesc && (
+                                <p className="text-[10px] text-gray-500 mt-0.5 leading-tight line-clamp-2">
+                                  {row.cClassTribDesc}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* CST */}
+                        <td className="py-2.5 px-3">
+                          {row.cst && (
+                            <code className="text-xs font-mono bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded">
+                              {row.cst}
+                            </code>
+                          )}
+                        </td>
+
+                        {/* Regime */}
+                        <td className="py-2.5 px-3">
+                          <p className="text-xs text-gray-600 leading-snug">{row.regime || '—'}</p>
+                        </td>
+
+                        {/* Red.IBS/CBS */}
+                        <td className="py-2.5 px-3 text-center">
+                          {row.status === 'done' && (
+                            <div className="space-y-0.5">
+                              <p className="text-xs font-mono text-gray-700">
+                                <span className="text-gray-400">IBS </span>
+                                {row.pRedIbs > 0 ? (
+                                  <span className="text-green-600 font-semibold">{row.pRedIbs}%</span>
+                                ) : '—'}
                               </p>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
-                            {row.status === 'done' && (
-                              <div className="flex flex-col items-center gap-1">
-                                <span className={cn('inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium', meta.color)}>
-                                  <ConfIcon className="h-3 w-3" />
-                                  {meta.label}
-                                </span>
+                              <p className="text-xs font-mono text-gray-700">
+                                <span className="text-gray-400">CBS </span>
+                                {row.pRedCbs > 0 ? (
+                                  <span className="text-green-600 font-semibold">{row.pRedCbs}%</span>
+                                ) : '—'}
+                              </p>
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Confiança */}
+                        <td className="py-2.5 px-3 text-center">
+                          {row.status === 'done' && (
+                            <div className="flex flex-col items-center gap-1">
+                              <span className={cn(
+                                'inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium',
+                                meta.color
+                              )}>
+                                <ConfIcon className="h-3 w-3" />
+                                {meta.label}
+                              </span>
+                              <div className="flex items-center gap-1">
                                 {row.usedAI && (
                                   <span className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 font-medium">
-                                    <Sparkles className="h-2.5 w-2.5" />
-                                    IA
+                                    <Sparkles className="h-2.5 w-2.5" /> IA
                                   </span>
                                 )}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => toggleSearch(row.id)}
-                              className="h-7 w-7 p-0 text-gray-400 hover:text-blue-600"
-                              title="Alterar NCM"
-                            >
-                              {row.searchOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-                            </Button>
-                          </td>
-                        </tr>
-
-                        {/* Inline search row */}
-                        {row.searchOpen && (
-                          <tr key={`${row.id}-search`} className="bg-blue-50 border-l-2 border-l-blue-500">
-                            <td />
-                            <td colSpan={5} className="py-3 px-3">
-                              <div className="space-y-2">
-                                <div className="flex gap-2">
-                                  <Input
-                                    autoFocus
-                                    value={row.searchQuery}
-                                    onChange={e => handleSearch(row.id, e.target.value)}
-                                    placeholder="Buscar por descrição do NCM..."
-                                    className="h-8 text-xs"
-                                  />
-                                  {row.searchLoading && <Loader2 className="h-4 w-4 animate-spin text-gray-400 my-auto" />}
-                                </div>
-                                {(row.searchResults.length > 0 || row.allOptions.length > 0) && (
-                                  <div className="grid gap-1 max-h-48 overflow-y-auto">
-                                    {(row.searchResults.length > 0 ? row.searchResults : row.allOptions).map(s => (
-                                      <button
-                                        key={s.code}
-                                        onClick={() => selectNcm(row.id, s)}
-                                        className="flex items-center gap-3 p-2 rounded-md bg-white border border-gray-200 hover:border-blue-400 hover:bg-blue-50 text-left transition-colors"
-                                      >
-                                        <code className="text-xs font-mono font-bold text-blue-700 shrink-0">{s.code}</code>
-                                        <span className="text-xs text-gray-600 line-clamp-1">{s.description}</span>
-                                        {s.score >= 20 && <Badge variant="success" className="text-[10px] px-1.5 shrink-0">Alta</Badge>}
-                                      </button>
-                                    ))}
-                                  </div>
+                                {row.fromCache && (
+                                  <span className="text-[10px] text-gray-400">(cache)</span>
                                 )}
                               </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
+                            </div>
+                          )}
+                          {row.status === 'error' && (
+                            <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium bg-red-100 text-red-700 border-red-200">
+                              <XCircle className="h-3 w-3" /> Erro
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Raciocínio */}
+                        <td className="py-2.5 px-3 max-w-xs">
+                          {row.reasoning && (
+                            <p className="text-xs text-gray-500 italic leading-snug line-clamp-3">
+                              {row.reasoning}
+                            </p>
+                          )}
+                        </td>
+                      </tr>
                     )
                   })}
                 </tbody>
@@ -637,11 +755,9 @@ export default function AdminNcmImport() {
                   >
                     <RotateCcw className="h-3.5 w-3.5" /> Novo Import
                   </Button>
-                  {stats.noNcm > 0 && (
-                    <span className="text-xs text-red-600">
-                      {stats.noNcm} itens sem NCM serão ignorados
-                    </span>
-                  )}
+                  <span className="text-xs text-gray-500">
+                    {stats.total} itens selecionados
+                  </span>
                 </div>
                 <Button
                   onClick={() => importMutation.mutate()}
@@ -653,7 +769,7 @@ export default function AdminNcmImport() {
                   ) : (
                     <CheckCircle className="h-4 w-4" />
                   )}
-                  Importar {stats.total - stats.noNcm} itens
+                  Importar {stats.total} itens
                 </Button>
               </div>
             )}
@@ -663,4 +779,3 @@ export default function AdminNcmImport() {
     </div>
   )
 }
-
