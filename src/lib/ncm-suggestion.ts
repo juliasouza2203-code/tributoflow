@@ -27,8 +27,78 @@ function normalize(text: string): string {
 }
 
 /**
- * Extract meaningful keywords from a product/service description
- * Removes common stop words in Portuguese
+ * Maps common Brazilian product/service colloquial names to official NCM terminology.
+ * Allows keyword search to find items even when the user uses everyday language.
+ */
+const NCM_SYNONYMS: Record<string, string[]> = {
+  // Informática / Eletrônicos
+  notebook:    ['portateis', 'processamento'],
+  laptop:      ['portateis', 'processamento'],
+  computador:  ['processamento', 'dados'],
+  desktop:     ['processamento', 'dados'],
+  celular:     ['telefonicos', 'moveis'],
+  smartphone:  ['telefonicos', 'moveis'],
+  tablet:      ['portateis', 'processamento'],
+  monitor:     ['monitores', 'video'],
+  impressora:  ['impressoras'],
+  teclado:     ['teclados'],
+  mouse:       ['dispositivos'],
+  roteador:    ['roteadores', 'redes'],
+  tv:          ['televisao', 'receptores'],
+  televisao:   ['televisao', 'receptores'],
+  camera:      ['cameras', 'fotograficas'],
+  // Eletrodomésticos
+  geladeira:   ['refrigeradores'],
+  refrigerador:['refrigeradores'],
+  fogao:       ['fogoes', 'cozinhar'],
+  microondas:  ['microondas'],
+  lavadora:    ['maquinas', 'lavar'],
+  maquina:     ['maquinas'],
+  // Veículos
+  carro:       ['automoveis', 'veiculos'],
+  veiculo:     ['veiculos', 'automoveis'],
+  moto:        ['motocicletas', 'ciclomotores'],
+  caminhao:    ['veiculos', 'carga'],
+  // Alimentos
+  arroz:       ['arroz'],
+  feijao:      ['feijao'],
+  carne:       ['carnes', 'bovinos'],
+  frango:      ['galos', 'galinhas', 'frangos'],
+  peixe:       ['peixes'],
+  acucar:      ['acucares'],
+  cafe:        ['cafe'],
+  // Vestuário
+  camisa:      ['camisas'],
+  calca:       ['calcas', 'vestuario'],
+  sapato:      ['calcados'],
+  tenis:       ['calcados'],
+  roupa:       ['vestuario', 'confeccoes'],
+  // Construção / Materiais
+  cimento:     ['cimento'],
+  tijolo:      ['tijolos'],
+  tinta:       ['tintas'],
+  cabo:        ['cabos'],
+  fio:         ['fios'],
+  tubo:        ['tubos'],
+  // Móveis
+  cadeira:     ['cadeiras', 'assentos'],
+  mesa:        ['mesas', 'moveis'],
+  sofa:        ['sofas', 'assentos'],
+  cama:        ['camas'],
+  armario:     ['armarios', 'moveis'],
+  // Medicamentos / Saúde
+  medicamento: ['medicamentos', 'farmaceuticos'],
+  remedio:     ['medicamentos', 'farmaceuticos'],
+  vacina:      ['vacinas'],
+  // Serviços (sem NCM, mas tenta NBS)
+  consultoria: ['servicos', 'tecnologia'],
+  servico:     ['servicos'],
+  manutencao:  ['manutencao', 'reparacao'],
+}
+
+/**
+ * Extract meaningful keywords from a product/service description.
+ * Expands colloquial terms to official NCM terminology via synonym map.
  */
 function extractKeywords(description: string): string[] {
   const stopWords = new Set([
@@ -38,14 +108,27 @@ function extractKeywords(description: string): string[] {
     'que', 'se', 'mais', 'menos', 'muito', 'pouco', 'todo', 'toda',
     'outro', 'outra', 'outros', 'outras', 'este', 'esta', 'esse',
     'essa', 'aquele', 'aquela', 'tipo', 'unidade', 'peca', 'pecas',
-    'produto', 'servico', 'item', 'material', 'uso', 'geral',
+    'produto', 'item', 'material', 'uso', 'geral',
   ])
 
   const normalized = normalize(description)
-  return normalized
+  const rawWords = normalized
     .split(' ')
     .filter(w => w.length >= 3 && !stopWords.has(w))
-    .slice(0, 6) // max 6 keywords
+
+  // Expand synonyms: replace/augment words found in the synonym map
+  const expanded: string[] = []
+  for (const word of rawWords) {
+    const synonyms = NCM_SYNONYMS[word]
+    if (synonyms) {
+      expanded.push(...synonyms) // use official terms
+    } else {
+      expanded.push(word) // keep original if not in map
+    }
+  }
+
+  // Deduplicate and limit
+  return [...new Set(expanded)].slice(0, 8)
 }
 
 /**
@@ -246,22 +329,12 @@ export interface NcmAiResult extends NcmBestMatch {
  * Fallback: if Edge Function fails, returns keyword-only best match
  */
 export async function classifyNcmWithAI(description: string): Promise<NcmAiResult> {
-  // Step 1: get keyword candidates
+  // Step 1: keyword candidates (now enriched with synonym expansion)
   const candidates = await suggestNcm(description, 20)
 
-  // If no candidates at all, try broader fallback search
-  if (candidates.length === 0) {
-    const fallback = await getBestNcmMatch(description)
-    return {
-      ...fallback,
-      reasoning: 'Nenhum candidato encontrado na tabela NCM para esta descrição.',
-      fromCache: false,
-      usedAI: false,
-    }
-  }
-
   try {
-    // Step 2: call Edge Function
+    // Step 2: call Edge Function — always, even with 0 candidates.
+    // When candidates = [], Claude classifies purely from its knowledge of Brazilian NCM.
     const { data, error } = await supabase.functions.invoke('classify-ncm', {
       body: {
         description,
@@ -271,15 +344,14 @@ export async function classifyNcmWithAI(description: string): Promise<NcmAiResul
 
     if (error || !data?.code) throw new Error(error?.message || 'No result from AI')
 
-    // Step 3: map response to NcmAiResult
-    const matchedSuggestion: NcmSuggestion | null = data.code
-      ? {
-          code: data.code,
-          description: data.ncmDescription || '',
-          score: data.confidence === 'high' ? 100 : data.confidence === 'medium' ? 60 : 20,
-          legal_ref: null,
-        }
-      : null
+    // Step 3: find the full description from candidates or use what Claude returned
+    const candidateMatch = candidates.find(c => c.code === data.code)
+    const matchedSuggestion: NcmSuggestion = {
+      code: data.code,
+      description: candidateMatch?.description || data.ncmDescription || '',
+      score: data.confidence === 'high' ? 100 : data.confidence === 'medium' ? 60 : 20,
+      legal_ref: candidateMatch?.legal_ref ?? null,
+    }
 
     return {
       suggestion: matchedSuggestion,
@@ -290,11 +362,13 @@ export async function classifyNcmWithAI(description: string): Promise<NcmAiResul
       usedAI: true,
     }
   } catch {
-    // Fallback to keyword-only
+    // Fallback to keyword-only best match
     const fallback = await getBestNcmMatch(description)
     return {
       ...fallback,
-      reasoning: 'Classificação por similaridade de palavras-chave (IA temporariamente indisponível).',
+      reasoning: candidates.length === 0
+        ? 'Nenhum candidato encontrado por palavras-chave. Verifique a descrição ou use a busca manual.'
+        : 'Classificação por similaridade de palavras-chave (IA temporariamente indisponível).',
       fromCache: false,
       usedAI: false,
     }

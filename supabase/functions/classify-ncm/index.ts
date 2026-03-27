@@ -61,12 +61,13 @@ Deno.serve(async (req) => {
     const body: ClassifyRequest = await req.json()
     const { description, candidates } = body
 
-    if (!description || !candidates?.length) {
+    if (!description) {
       return new Response(
-        JSON.stringify({ error: 'description and candidates are required' }),
+        JSON.stringify({ error: 'description is required' }),
         { status: 400, headers: corsHeaders }
       )
     }
+    const hasCandidates = Array.isArray(candidates) && candidates.length > 0
 
     // 1. Check cache
     const hash = await hashDescription(description)
@@ -87,8 +88,14 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify(response), { headers: corsHeaders })
     }
 
-    // 2. No API key — fallback to first candidate
+    // 2. No API key — fallback to first candidate or error
     if (!anthropicKey) {
+      if (!hasCandidates) {
+        return new Response(
+          JSON.stringify({ error: 'ANTHROPIC_API_KEY not configured and no candidates available' }),
+          { status: 500, headers: corsHeaders }
+        )
+      }
       const best = candidates[0]
       return new Response(
         JSON.stringify({
@@ -105,27 +112,28 @@ Deno.serve(async (req) => {
     // 3. Call Claude Haiku
     const anthropic = new Anthropic({ apiKey: anthropicKey })
 
-    const candidateList = candidates
-      .slice(0, 20)
-      .map((c, i) => `${i + 1}. ${c.code} — ${c.description}`)
-      .join('\n')
+    // Build prompt depending on whether we have candidates or not
+    const candidateSection = hasCandidates
+      ? `Candidatos NCM pré-selecionados por palavras-chave (código — descrição oficial):
+${(candidates as Candidate[]).slice(0, 20).map((c, i) => `${i + 1}. ${c.code} — ${c.description}`).join('\n')}
+
+Prefira um dos candidatos acima se for adequado. Se nenhum for correto, use seu conhecimento de NCM para indicar o código correto.`
+      : `Não foram encontrados candidatos por palavras-chave. Use seu conhecimento da Nomenclatura Comum do Mercosul (NCM) para classificar este produto. Retorne o código NCM de 8 dígitos mais adequado segundo a tabela oficial brasileira.`
 
     const prompt = `Você é um especialista em classificação fiscal brasileira (NCM — Nomenclatura Comum do Mercosul).
 
 Produto a classificar: "${description}"
 
-Candidatos NCM disponíveis (código — descrição oficial da Receita Federal):
-${candidateList}
-
-Analise o produto e selecione o NCM mais adequado entre os candidatos acima.
+${candidateSection}
 
 Responda SOMENTE com um JSON válido, sem texto adicional:
-{"code": "XXXXXXXX", "confidence": "high|medium|low|none", "reasoning": "explicação breve em português"}
+{"code": "XXXXXXXX", "ncmDescription": "descrição oficial do NCM", "confidence": "high|medium|low|none", "reasoning": "explicação breve em português"}
 
 Regras:
-- "code" deve ser exatamente um dos códigos listados acima (8 dígitos sem pontos), ou "none" se nenhum for adequado
-- "confidence": high = certeza, medium = provável, low = possível, none = sem candidato adequado
-- "reasoning": máximo 80 palavras explicando por que esse NCM foi escolhido`
+- "code": 8 dígitos sem pontos, ou "none" se não houver NCM aplicável (ex: serviços puros)
+- "ncmDescription": descrição oficial da posição NCM escolhida
+- "confidence": high = certeza, medium = provável, low = possível, none = sem NCM aplicável
+- "reasoning": máximo 80 palavras explicando a classificação`
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
@@ -136,24 +144,28 @@ Regras:
     const rawText = message.content[0].type === 'text' ? message.content[0].text.trim() : '{}'
 
     // Parse JSON response from Claude
-    let parsed: { code: string; confidence: string; reasoning: string }
+    let parsed: { code: string; ncmDescription?: string; confidence: string; reasoning: string }
     try {
       // Extract JSON from response (Claude might add markdown)
       const jsonMatch = rawText.match(/\{[\s\S]*\}/)
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText)
     } catch {
-      // Parse failed — fallback to first candidate
+      // Parse failed — fallback to first candidate or none
       parsed = {
-        code: candidates[0].code,
-        confidence: 'low',
-        reasoning: 'Resposta da IA não pôde ser interpretada. Usando melhor candidato por palavras-chave.',
+        code: hasCandidates ? (candidates as Candidate[])[0].code : 'none',
+        ncmDescription: hasCandidates ? (candidates as Candidate[])[0].description : undefined,
+        confidence: hasCandidates ? 'low' : 'none',
+        reasoning: 'Resposta da IA não pôde ser interpretada.',
       }
     }
 
-    // Find matching candidate for description
-    const matchedCandidate = candidates.find(c => c.code === parsed.code)
-    const finalCode = matchedCandidate ? parsed.code : (parsed.code === 'none' ? null : candidates[0].code)
-    const finalDescription = matchedCandidate?.description ?? candidates[0]?.description ?? null
+    // Find matching candidate or use Claude's own description
+    const safeCode = parsed.code === 'none' ? null : parsed.code
+    const matchedCandidate = hasCandidates
+      ? (candidates as Candidate[]).find(c => c.code === safeCode)
+      : null
+    const finalCode = safeCode ?? null
+    const finalDescription = matchedCandidate?.description ?? parsed.ncmDescription ?? null
     const finalConfidence = (['high', 'medium', 'low', 'none'].includes(parsed.confidence)
       ? parsed.confidence
       : 'low') as ClassifyResponse['confidence']
