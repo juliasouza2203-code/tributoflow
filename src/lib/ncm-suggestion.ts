@@ -30,49 +30,54 @@ function normalize(text: string): string {
  * Maps common Brazilian product/service colloquial names to official NCM terminology.
  * Allows keyword search to find items even when the user uses everyday language.
  */
+/**
+ * Keys = normalized (sem acento, minúsculo) | Values = termos com acento exato como aparecem no NCM oficial.
+ * Retorna DOIS elementos por sinônimo: [original_acentuado, versao_normalizada]
+ * assim o ILIKE encontra nas descrições com acento E o scoreMatch funciona.
+ */
 const NCM_SYNONYMS: Record<string, string[]> = {
   // Informática / Eletrônicos
-  notebook:    ['portateis', 'processamento'],
-  laptop:      ['portateis', 'processamento'],
+  notebook:    ['portáteis', 'portateis', 'processamento'],
+  laptop:      ['portáteis', 'portateis', 'processamento'],
   computador:  ['processamento', 'dados'],
   desktop:     ['processamento', 'dados'],
-  celular:     ['telefonicos', 'moveis'],
-  smartphone:  ['telefonicos', 'moveis'],
-  tablet:      ['portateis', 'processamento'],
-  monitor:     ['monitores', 'video'],
+  celular:     ['telefônicos', 'telefonicos', 'móveis', 'moveis'],
+  smartphone:  ['telefônicos', 'telefonicos', 'móveis', 'moveis'],
+  tablet:      ['portáteis', 'portateis', 'processamento'],
+  monitor:     ['monitores', 'vídeo', 'video'],
   impressora:  ['impressoras'],
   teclado:     ['teclados'],
   mouse:       ['dispositivos'],
-  roteador:    ['roteadores', 'redes'],
-  tv:          ['televisao', 'receptores'],
-  televisao:   ['televisao', 'receptores'],
-  camera:      ['cameras', 'fotograficas'],
+  roteador:    ['roteadores'],
+  tv:          ['televisão', 'televisao', 'receptores'],
+  televisao:   ['televisão', 'televisao', 'receptores'],
+  camera:      ['câmeras', 'cameras', 'fotográficas', 'fotograficas'],
   // Eletrodomésticos
   geladeira:   ['refrigeradores'],
   refrigerador:['refrigeradores'],
-  fogao:       ['fogoes', 'cozinhar'],
+  fogao:       ['fogões', 'fogoes'],
   microondas:  ['microondas'],
-  lavadora:    ['maquinas', 'lavar'],
-  maquina:     ['maquinas'],
+  lavadora:    ['máquinas', 'maquinas', 'lavar'],
+  maquina:     ['máquinas', 'maquinas'],
   // Veículos
-  carro:       ['automoveis', 'veiculos'],
-  veiculo:     ['veiculos', 'automoveis'],
+  carro:       ['automóveis', 'automoveis'],
+  veiculo:     ['veículos', 'veiculos', 'automóveis', 'automoveis'],
   moto:        ['motocicletas', 'ciclomotores'],
-  caminhao:    ['veiculos', 'carga'],
+  caminhao:    ['veículos', 'veiculos', 'carga'],
   // Alimentos
   arroz:       ['arroz'],
-  feijao:      ['feijao'],
+  feijao:      ['feijão', 'feijao'],
   carne:       ['carnes', 'bovinos'],
   frango:      ['galos', 'galinhas', 'frangos'],
   peixe:       ['peixes'],
-  acucar:      ['acucares'],
-  cafe:        ['cafe'],
+  acucar:      ['açúcares', 'acucares'],
+  cafe:        ['café', 'cafe'],
   // Vestuário
   camisa:      ['camisas'],
-  calca:       ['calcas', 'vestuario'],
-  sapato:      ['calcados'],
-  tenis:       ['calcados'],
-  roupa:       ['vestuario', 'confeccoes'],
+  calca:       ['calças', 'calcas'],
+  sapato:      ['calçados', 'calcados'],
+  tenis:       ['calçados', 'calcados'],
+  roupa:       ['vestuário', 'vestuario', 'confecções', 'confeccoes'],
   // Construção / Materiais
   cimento:     ['cimento'],
   tijolo:      ['tijolos'],
@@ -82,18 +87,18 @@ const NCM_SYNONYMS: Record<string, string[]> = {
   tubo:        ['tubos'],
   // Móveis
   cadeira:     ['cadeiras', 'assentos'],
-  mesa:        ['mesas', 'moveis'],
-  sofa:        ['sofas', 'assentos'],
+  mesa:        ['mesas', 'móveis', 'moveis'],
+  sofa:        ['sofás', 'sofas', 'assentos'],
   cama:        ['camas'],
-  armario:     ['armarios', 'moveis'],
+  armario:     ['armários', 'armarios', 'móveis', 'moveis'],
   // Medicamentos / Saúde
-  medicamento: ['medicamentos', 'farmaceuticos'],
-  remedio:     ['medicamentos', 'farmaceuticos'],
+  medicamento: ['medicamentos', 'farmacêuticos', 'farmaceuticos'],
+  remedio:     ['medicamentos', 'farmacêuticos', 'farmaceuticos'],
   vacina:      ['vacinas'],
-  // Serviços (sem NCM, mas tenta NBS)
-  consultoria: ['servicos', 'tecnologia'],
-  servico:     ['servicos'],
-  manutencao:  ['manutencao', 'reparacao'],
+  // Serviços (sem NCM direto)
+  consultoria: ['serviços', 'servicos', 'tecnologia'],
+  servico:     ['serviços', 'servicos'],
+  manutencao:  ['manutenção', 'manutencao', 'reparação', 'reparacao'],
 }
 
 /**
@@ -139,11 +144,12 @@ function scoreMatch(ncmDesc: string, keywords: string[]): number {
   let score = 0
 
   for (const kw of keywords) {
-    if (normalizedDesc.includes(kw)) {
-      // Exact substring match
+    // Normalize kw too so "portáteis" matches against normalized "portateis" in description
+    const normalizedKw = normalize(kw)
+    if (!normalizedKw) continue
+    if (normalizedDesc.includes(normalizedKw)) {
       score += 10
-      // Bonus for word boundary match
-      const regex = new RegExp(`\\b${kw}\\b`)
+      const regex = new RegExp(`\\b${normalizedKw}\\b`)
       if (regex.test(normalizedDesc)) {
         score += 5
       }
