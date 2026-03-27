@@ -98,7 +98,7 @@ export default function AdminNcmImport() {
   const [xlsxHeaders, setXlsxHeaders] = useState<string[]>([])
   const [xlsxRaw, setXlsxRaw] = useState<Record<string, unknown>[]>([])
   const [descCol, setDescCol] = useState('')
-  const [priceCol, setPriceCol] = useState('')
+  const [priceCol, setPriceCol] = useState('__none__')
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
@@ -133,7 +133,7 @@ export default function AdminNcmImport() {
         const detectedDesc = detectDescriptionColumn(headers)
         const detectedPrice = detectPriceColumn(headers)
         setDescCol(detectedDesc || '')
-        setPriceCol(detectedPrice || '')
+        setPriceCol(detectedPrice || '__none__')
         setStep('mapping')
         toast.success(`${jsonData.length} linhas detectadas`)
       } catch {
@@ -163,14 +163,14 @@ export default function AdminNcmImport() {
     const initialRows: ImportRow[] = xlsxRaw.map((raw, idx) => ({
       id: `row-${idx}`,
       description: String(raw[descCol] || '').trim(),
-      price: priceCol ? parseFloat(String(raw[priceCol] || '0')) || undefined : undefined,
+      price: (priceCol && priceCol !== '__none__') ? parseFloat(String(raw[priceCol] || '0')) || undefined : undefined,
       reasoning: '',
       usedAI: false,
       fromCache: false,
       unit: undefined,
       ncmCode: '',
       ncmDescription: '',
-      confidence: 'none' as import('@/lib/ncm-suggestion').NcmConfidence,
+      confidence: 'none' as NcmConfidence,
       allOptions: [],
       status: 'pending' as const,
       included: true,
@@ -187,29 +187,46 @@ export default function AdminNcmImport() {
 
     let done = 0
 
-    await processBatch(
-      initialRows,
-      async (row) => {
-        const match = await classifyNcmWithAI(row.description)
-        setRows(prev => prev.map(r => r.id !== row.id ? r : {
-          ...r,
-          ncmCode: match.suggestion?.code || '',
-          ncmDescription: match.suggestion?.description || '',
-          confidence: match.confidence,
-          allOptions: match.allSuggestions,
-          reasoning: match.reasoning || '',
-          usedAI: match.usedAI,
-          fromCache: match.fromCache,
-          status: 'done',
-        }))
-        done++
-        setProgress(Math.round((done / initialRows.length) * 100))
-      },
-      6,
-    )
-
-    setProcessing(false)
-    toast.success('Classificação concluída!')
+    try {
+      await processBatch(
+        initialRows,
+        async (row) => {
+          try {
+            const match = await classifyNcmWithAI(row.description)
+            const safeConfidence: NcmConfidence =
+              (match.confidence && match.confidence in CONFIDENCE_META)
+                ? match.confidence
+                : 'none'
+            setRows(prev => prev.map(r => r.id !== row.id ? r : {
+              ...r,
+              ncmCode: match.suggestion?.code || '',
+              ncmDescription: match.suggestion?.description || '',
+              confidence: safeConfidence,
+              allOptions: match.allSuggestions ?? [],
+              reasoning: match.reasoning || '',
+              usedAI: match.usedAI ?? false,
+              fromCache: match.fromCache ?? false,
+              status: 'done' as const,
+            }))
+          } catch {
+            setRows(prev => prev.map(r => r.id !== row.id ? r : {
+              ...r,
+              confidence: 'none' as NcmConfidence,
+              status: 'error' as const,
+              reasoning: 'Erro ao classificar este item.',
+            }))
+          }
+          done++
+          setProgress(Math.round((done / initialRows.length) * 100))
+        },
+        6,
+      )
+      toast.success('Classificação concluída!')
+    } catch (err: any) {
+      toast.error('Erro durante classificação: ' + (err?.message || 'tente novamente'))
+    } finally {
+      setProcessing(false)
+    }
   }
 
   // ── Inline NCM search ─────────────────────────────────────────
@@ -399,7 +416,7 @@ export default function AdminNcmImport() {
                   <SelectValue placeholder="Sem preço" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Sem preço</SelectItem>
+                  <SelectItem value="__none__">Sem preço</SelectItem>
                   {xlsxHeaders.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
                 </SelectContent>
               </Select>
@@ -498,7 +515,7 @@ export default function AdminNcmImport() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {rows.map(row => {
-                    const meta = CONFIDENCE_META[row.confidence]
+                    const meta = CONFIDENCE_META[row.confidence] ?? CONFIDENCE_META.none
                     const ConfIcon = meta.icon
                     return (
                       <React.Fragment key={row.id}>
