@@ -12,7 +12,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from 'sonner'
-import { Tags, ChevronRight, CheckCircle, Loader2, ExternalLink, AlertCircle, RefreshCw } from 'lucide-react'
+import { Tags, ChevronRight, CheckCircle, Loader2, ExternalLink, AlertCircle, RefreshCw, Search, ChevronDown, ChevronUp } from 'lucide-react'
 import { consultarNcmCff, type CffCard } from '@/integrations/fiscal/consulta-cff'
 
 // CST groups from LC 214/2025 — maps 3-digit prefix to label
@@ -59,6 +59,12 @@ export default function AdminClassification() {
   const [cffError, setCffError] = useState<string | null>(null)
   const [confirmedNcm, setConfirmedNcm] = useState<string>('')
 
+  // NCM search panel (Step 1)
+  const [ncmSearchOpen, setNcmSearchOpen] = useState(false)
+  const [ncmSearchQuery, setNcmSearchQuery] = useState('')
+  const [ncmSearchResults, setNcmSearchResults] = useState<{ code: string; description: string }[]>([])
+  const [ncmSearchLoading, setNcmSearchLoading] = useState(false)
+
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
     queryFn: async () => {
@@ -90,6 +96,28 @@ export default function AdminClassification() {
 
   const selectedCst = watch('cst_ibs_cbs')
   const selectedCclass = watch('cclasstrib_code')
+
+  // NCM search: debounce query then hit tax_ncm table
+  async function searchNcm(query: string) {
+    if (!query || query.trim().length < 2) {
+      setNcmSearchResults([])
+      return
+    }
+    setNcmSearchLoading(true)
+    const { data } = await (supabase as any)
+      .from('tax_ncm')
+      .select('code, description')
+      .ilike('description', `%${query.trim()}%`)
+      .is('end_date', null)
+      .limit(10)
+    setNcmSearchResults((data as { code: string; description: string }[]) || [])
+    setNcmSearchLoading(false)
+  }
+
+  useEffect(() => {
+    const timer = setTimeout(() => { searchNcm(ncmSearchQuery) }, 400)
+    return () => clearTimeout(timer)
+  }, [ncmSearchQuery])
 
   // Group CFF cards by CST prefix (first 3 digits of cclasstrib)
   const groupedCards = cffCards.reduce<Record<string, CffCard[]>>((acc, card) => {
@@ -265,6 +293,79 @@ export default function AdminClassification() {
                         <Input {...register('nbs_used')} defaultValue={selectedItem.nbs_code || ''} placeholder="1.01.01.10" />
                       </div>
                     </div>
+                    {/* NCM lookup panel */}
+                    <div className="border border-gray-200 rounded-lg overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => { setNcmSearchOpen(o => !o); setNcmSearchQuery(''); setNcmSearchResults([]) }}
+                        className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-medium text-gray-700"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Search className="h-4 w-4 text-gray-400" />
+                          Buscar NCM na tabela oficial
+                        </span>
+                        {ncmSearchOpen ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+                      </button>
+
+                      {ncmSearchOpen && (
+                        <div className="p-4 space-y-3 border-t border-gray-200">
+                          <div className="relative">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                            <Input
+                              value={ncmSearchQuery}
+                              onChange={e => setNcmSearchQuery(e.target.value)}
+                              placeholder="Digite uma palavra-chave (ex: soja, calçado, software...)"
+                              className="pl-9"
+                              autoFocus
+                            />
+                          </div>
+
+                          {ncmSearchLoading && (
+                            <div className="flex items-center gap-2 text-xs text-gray-500 py-2">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              Buscando…
+                            </div>
+                          )}
+
+                          {!ncmSearchLoading && ncmSearchResults.length === 0 && ncmSearchQuery.trim().length >= 2 && (
+                            <p className="text-xs text-gray-400 py-2">Nenhum NCM encontrado para "{ncmSearchQuery}".</p>
+                          )}
+
+                          {!ncmSearchLoading && ncmSearchResults.length > 0 && (
+                            <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                              {ncmSearchResults.map(r => (
+                                <div
+                                  key={r.code}
+                                  className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors"
+                                >
+                                  <div className="flex items-start gap-2 min-w-0">
+                                    <code className="text-xs font-mono font-bold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded shrink-0">
+                                      {r.code}
+                                    </code>
+                                    <p className="text-xs text-gray-700 leading-snug">{r.description}</p>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="shrink-0 h-7 text-xs"
+                                    onClick={() => {
+                                      setValue('ncm_used', r.code)
+                                      setNcmSearchOpen(false)
+                                      setNcmSearchQuery('')
+                                      setNcmSearchResults([])
+                                    }}
+                                  >
+                                    Usar este NCM
+                                  </Button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                     <Button type="button" onClick={goToStep2}>Próximo</Button>
                   </div>
                 )}

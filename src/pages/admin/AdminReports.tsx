@@ -2,11 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { supabase } from '@/integrations/supabase/client'
 import { useAuth } from '@/contexts/AuthContext'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { formatDate, formatCurrency } from '@/lib/utils'
-import { FileText, Download } from 'lucide-react'
-import { useState } from 'react'
+import { FileText, Download, BarChart2, Users, Package, TrendingUp } from 'lucide-react'
+import { useState, useMemo } from 'react'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import { generateClassificationReportPDF } from '@/lib/pdf/generateAuditReportPDF'
@@ -14,6 +15,7 @@ import { generateClassificationReportPDF } from '@/lib/pdf/generateAuditReportPD
 export default function AdminReports() {
   const { officeId, profile } = useAuth()
   const [filterCompany, setFilterCompany] = useState('all')
+  const [filterProduct, setFilterProduct] = useState('')
 
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
@@ -48,6 +50,19 @@ export default function AdminReports() {
     enabled: !!officeId,
   })
 
+  const { data: companySummary } = useQuery({
+    queryKey: ['company-summary', officeId, filterCompany],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from('items')
+        .select('id, status, base_cost, ncm_current')
+        .eq('office_id', officeId!)
+        .eq('company_id', filterCompany)
+      return data || []
+    },
+    enabled: !!officeId && filterCompany !== 'all',
+  })
+
   const { data: auditLogs } = useQuery({
     queryKey: ['audit-logs', officeId],
     queryFn: async () => {
@@ -62,9 +77,34 @@ export default function AdminReports() {
     enabled: !!officeId,
   })
 
+  // Client-side filter by product description
+  const filteredClassifications = useMemo(() => {
+    if (!classifications) return []
+    if (!filterProduct.trim()) return classifications
+    const term = filterProduct.trim().toLowerCase()
+    return classifications.filter((c: any) =>
+      (c.items?.description || '').toLowerCase().includes(term)
+    )
+  }, [classifications, filterProduct])
+
+  // Company summary KPIs
+  const kpis = useMemo(() => {
+    if (!companySummary) return null
+    const total = companySummary.length
+    const classified = companySummary.filter((i: any) => i.status === 'classified' || i.status === 'approved').length
+    const pending = total - classified
+    const classifiedPct = total > 0 ? Math.round((classified / total) * 100) : 0
+    const costsWithValue = companySummary.filter((i: any) => i.base_cost != null)
+    const avgCost = costsWithValue.length > 0
+      ? costsWithValue.reduce((sum: number, i: any) => sum + Number(i.base_cost), 0) / costsWithValue.length
+      : 0
+    const uniqueNcms = new Set(companySummary.map((i: any) => i.ncm_current).filter(Boolean)).size
+    return { total, classified, classifiedPct, pending, avgCost, uniqueNcms }
+  }, [companySummary])
+
   function exportClassifications() {
-    if (!classifications?.length) return toast.info('Sem dados para exportar')
-    const rows = classifications.map((c: any) => ({
+    if (!filteredClassifications?.length) return toast.info('Sem dados para exportar')
+    const rows = filteredClassifications.map((c: any) => ({
       'Item': c.items?.description || '',
       'NCM Usado': c.ncm_used || '',
       'CST': c.cst_ibs_cbs || '',
@@ -82,8 +122,8 @@ export default function AdminReports() {
   }
 
   function exportPDF() {
-    if (!classifications?.length) return toast.info('Sem dados para exportar')
-    const rows = classifications.map((c: any) => ({
+    if (!filteredClassifications?.length) return toast.info('Sem dados para exportar')
+    const rows = filteredClassifications.map((c: any) => ({
       itemDescription: c.items?.description || '',
       companyName: (c.client_companies as any)?.trade_name || (c.client_companies as any)?.legal_name || '',
       ncmUsed: c.ncm_used || '',
@@ -96,7 +136,7 @@ export default function AdminReports() {
     }))
 
     const selectedCompany = filterCompany !== 'all'
-      ? companies?.find(c => c.id === filterCompany)
+      ? companies?.find((c: any) => c.id === filterCompany)
       : null
 
     generateClassificationReportPDF({
@@ -125,27 +165,90 @@ export default function AdminReports() {
         </div>
       </div>
 
-      <div className="flex gap-3">
+      {/* Filters row */}
+      <div className="flex gap-3 flex-wrap">
         <Select value={filterCompany} onValueChange={setFilterCompany}>
           <SelectTrigger className="w-64"><SelectValue placeholder="Filtrar empresa" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Todas</SelectItem>
-            {companies?.map(c => <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>)}
+            {companies?.map((c: any) => (
+              <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
+
+        <div className="relative">
+          <Package className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+          <Input
+            className="pl-9 w-64"
+            placeholder="Buscar produto / item..."
+            value={filterProduct}
+            onChange={e => setFilterProduct(e.target.value)}
+          />
+        </div>
       </div>
+
+      {/* Company KPI cards — shown only when a company is selected */}
+      {filterCompany !== 'all' && kpis && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          <div className="border border-gray-200 rounded-xl bg-white p-4 shadow-sm flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase tracking-wide">
+              <Users className="h-4 w-4 text-blue-400" />
+              Total Itens
+            </div>
+            <p className="text-2xl font-bold text-gray-900">{kpis.total}</p>
+            <p className="text-xs text-gray-400">importados</p>
+          </div>
+
+          <div className="border border-gray-200 rounded-xl bg-white p-4 shadow-sm flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase tracking-wide">
+              <BarChart2 className="h-4 w-4 text-green-400" />
+              Classificados
+            </div>
+            <p className="text-2xl font-bold text-gray-900">{kpis.classified}</p>
+            <p className="text-xs text-gray-400">{kpis.classifiedPct}% do total</p>
+          </div>
+
+          <div className="border border-gray-200 rounded-xl bg-white p-4 shadow-sm flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase tracking-wide">
+              <FileText className="h-4 w-4 text-yellow-400" />
+              Pendentes
+            </div>
+            <p className="text-2xl font-bold text-gray-900">{kpis.pending}</p>
+            <p className="text-xs text-gray-400">aguardando classificação</p>
+          </div>
+
+          <div className="border border-gray-200 rounded-xl bg-white p-4 shadow-sm flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase tracking-wide">
+              <TrendingUp className="h-4 w-4 text-purple-400" />
+              Custo Médio
+            </div>
+            <p className="text-2xl font-bold text-gray-900">{formatCurrency(kpis.avgCost)}</p>
+            <p className="text-xs text-gray-400">base_cost médio</p>
+          </div>
+
+          <div className="border border-gray-200 rounded-xl bg-white p-4 shadow-sm flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase tracking-wide">
+              <Package className="h-4 w-4 text-orange-400" />
+              NCMs Únicos
+            </div>
+            <p className="text-2xl font-bold text-gray-900">{kpis.uniqueNcms}</p>
+            <p className="text-xs text-gray-400">utilizados</p>
+          </div>
+        </div>
+      )}
 
       {/* Classifications table */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="flex items-center justify-between p-5 border-b border-gray-200">
           <h3 className="font-semibold text-gray-900">Mapa de Classificações</h3>
-          <Badge variant="secondary">{classifications?.length || 0} registros</Badge>
+          <Badge variant="secondary">{filteredClassifications?.length || 0} registros</Badge>
         </div>
         {isLoading ? (
           <div className="p-6 space-y-3">
             {[1,2,3].map(i => <div key={i} className="h-14 animate-pulse bg-gray-100 rounded-lg" />)}
           </div>
-        ) : classifications?.length === 0 ? (
+        ) : filteredClassifications?.length === 0 ? (
           <div className="py-16 text-center">
             <FileText className="h-10 w-10 text-gray-300 mx-auto mb-3" />
             <p className="text-sm text-gray-500">Nenhuma classificação registrada ainda.</p>
@@ -165,7 +268,7 @@ export default function AdminReports() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {classifications?.map((c: any) => (
+                {filteredClassifications?.map((c: any) => (
                   <tr key={c.id} className="hover:bg-gray-50">
                     <td className="py-3 px-4 text-gray-900 max-w-xs truncate">{c.items?.description || '—'}</td>
                     <td className="py-3 px-4 font-mono text-xs text-gray-600">{c.ncm_used || '—'}</td>

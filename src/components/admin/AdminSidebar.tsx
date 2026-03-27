@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
 import {
   LayoutDashboard, Building2, Package, Search, Tags,
-  Calculator, FileText, Users, Settings, LogOut, ChevronLeft,
+  Calculator, FileText, Users, Settings, LogOut, ChevronLeft, FileUp,
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -11,6 +11,7 @@ const navItems = [
   { href: '/admin/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/admin/clientes', label: 'Empresas Clientes', icon: Building2 },
   { href: '/admin/itens', label: 'Itens / Produtos', icon: Package },
+  { href: '/admin/importar-ncm', label: 'Importar Produtos', icon: FileUp },
   { href: '/admin/ncm-diagnostico', label: 'Diagnóstico NCM', icon: Search },
   { href: '/admin/classificacao', label: 'Classificação Fiscal', icon: Tags },
   { href: '/admin/precos', label: 'Simulador de Preços', icon: Calculator },

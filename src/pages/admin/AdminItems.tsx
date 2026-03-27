@@ -6,8 +6,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { Plus, Upload, Search, Package } from 'lucide-react'
+import { Plus, Upload, Search, Package, Building2 } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import type { ItemStatus } from '@/integrations/supabase/types'
 
@@ -23,6 +24,8 @@ export default function AdminItems() {
   const [search, setSearch] = useState('')
   const [filterCompany, setFilterCompany] = useState('all')
   const [filterStatus, setFilterStatus] = useState('all')
+  const [showUploadDialog, setShowUploadDialog] = useState(false)
+  const [uploadCompanyId, setUploadCompanyId] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const { data: companies } = useQuery({
@@ -51,8 +54,7 @@ export default function AdminItems() {
   })
 
   const importMutation = useMutation({
-    mutationFn: async (rows: any[]) => {
-      const companyId = filterCompany !== 'all' ? filterCompany : companies?.[0]?.id
+    mutationFn: async ({ rows, companyId }: { rows: any[]; companyId: string }) => {
       if (!companyId) throw new Error('Selecione uma empresa antes de importar')
 
       const items = rows.map(r => ({
@@ -78,18 +80,48 @@ export default function AdminItems() {
     onError: (e: any) => toast.error(e.message || 'Erro ao importar itens'),
   })
 
+  function handleUploadClick() {
+    if (filterCompany === 'all') {
+      setUploadCompanyId('')
+      setShowUploadDialog(true)
+    } else {
+      fileRef.current?.click()
+    }
+  }
+
+  function handleDialogConfirm() {
+    if (!uploadCompanyId) {
+      toast.error('Selecione uma empresa para continuar.')
+      return
+    }
+    setShowUploadDialog(false)
+    // Use a slight delay so dialog closes before file picker opens
+    setTimeout(() => fileRef.current?.click(), 100)
+  }
+
   function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
+
+    // Determine which company to use: dialog selection or current filter
+    const companyId = filterCompany !== 'all' ? filterCompany : uploadCompanyId
+    if (!companyId) {
+      toast.error('Nenhuma empresa selecionada. Por favor, selecione uma empresa antes de importar.')
+      e.target.value = ''
+      return
+    }
+
     const reader = new FileReader()
     reader.onload = (ev) => {
       const wb = XLSX.read(ev.target?.result, { type: 'binary' })
       const ws = wb.Sheets[wb.SheetNames[0]]
       const rows = XLSX.utils.sheet_to_json(ws)
-      importMutation.mutate(rows)
+      importMutation.mutate({ rows, companyId })
     }
     reader.readAsBinaryString(file)
     e.target.value = ''
+    // Reset dialog company selection after use
+    setUploadCompanyId('')
   }
 
   const filtered = (items || []).filter(i =>
@@ -98,8 +130,55 @@ export default function AdminItems() {
     (i.ncm_current || '').includes(search)
   )
 
+  const selectedCompany = filterCompany !== 'all'
+    ? companies?.find(c => c.id === filterCompany)
+    : null
+
+  const classifiedCount = filtered.filter(i => i.status === 'classified').length
+  const pendingCount = filtered.filter(i => i.status === 'pending').length
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
+
+      {/* Upload Company Selection Dialog */}
+      <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5 text-blue-600" />
+              Selecionar Empresa para Importação
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-4 space-y-3">
+            <p className="text-sm text-gray-500">
+              Nenhuma empresa está selecionada. Escolha para qual empresa os itens da planilha serão importados.
+            </p>
+            <Select value={uploadCompanyId} onValueChange={setUploadCompanyId}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Selecione uma empresa..." />
+              </SelectTrigger>
+              <SelectContent>
+                {companies?.map(c => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.trade_name || c.legal_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setShowUploadDialog(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleDialogConfirm} disabled={!uploadCompanyId}>
+              <Upload className="h-4 w-4 mr-2" />
+              Confirmar e Selecionar Arquivo
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Itens / Produtos</h1>
@@ -107,7 +186,7 @@ export default function AdminItems() {
         </div>
         <div className="flex gap-2">
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileUpload} />
-          <Button variant="outline" onClick={() => fileRef.current?.click()} className="gap-2" disabled={importMutation.isPending}>
+          <Button variant="outline" onClick={handleUploadClick} className="gap-2" disabled={importMutation.isPending}>
             <Upload className="h-4 w-4" />
             {importMutation.isPending ? 'Importando...' : 'Importar XLSX'}
           </Button>
@@ -117,21 +196,73 @@ export default function AdminItems() {
         </div>
       </div>
 
-      {/* Filters */}
+      {/* Prominent Company Selector */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <div className="flex items-center gap-3">
+          <Building2 className="h-5 w-5 text-blue-600 shrink-0" />
+          <div className="flex-1">
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">
+              Cliente / Empresa
+            </label>
+            <Select value={filterCompany} onValueChange={setFilterCompany}>
+              <SelectTrigger className="w-full max-w-sm border-blue-200 focus:ring-blue-500">
+                <SelectValue placeholder="Selecione uma empresa..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todas as empresas</SelectItem>
+                {companies?.map(c => (
+                  <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {filterCompany !== 'all' && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs text-gray-500"
+              onClick={() => setFilterCompany('all')}
+            >
+              Ver todos
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Company Stats Bar (shown when a company is selected) */}
+      {selectedCompany && (
+        <div className="bg-blue-50 border border-blue-100 rounded-xl px-5 py-4 flex flex-wrap items-center gap-6">
+          <div className="flex items-center gap-2">
+            <Building2 className="h-5 w-5 text-blue-600" />
+            <span className="font-semibold text-blue-900 text-base">
+              {selectedCompany.trade_name || selectedCompany.legal_name}
+            </span>
+          </div>
+          <div className="flex gap-5 text-sm">
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-blue-700">{filtered.length}</span>
+              <span className="text-xs text-blue-500">Total de Itens</span>
+            </div>
+            <div className="w-px bg-blue-200" />
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-green-600">{classifiedCount}</span>
+              <span className="text-xs text-green-500">Classificados</span>
+            </div>
+            <div className="w-px bg-blue-200" />
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-amber-500">{pendingCount}</span>
+              <span className="text-xs text-amber-500">Pendentes</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Search & Status Filters */}
       <div className="flex flex-wrap gap-3">
         <div className="relative flex-1 min-w-48">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <Input placeholder="Buscar por descrição, código, NCM..." className="pl-9" value={search} onChange={e => setSearch(e.target.value)} />
         </div>
-        <Select value={filterCompany} onValueChange={setFilterCompany}>
-          <SelectTrigger className="w-52"><SelectValue placeholder="Empresa" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">Todas as empresas</SelectItem>
-            {companies?.map(c => (
-              <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         <Select value={filterStatus} onValueChange={setFilterStatus}>
           <SelectTrigger className="w-44"><SelectValue placeholder="Status" /></SelectTrigger>
           <SelectContent>

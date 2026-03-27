@@ -21,6 +21,7 @@ import AdminPriceSimulation from '@/pages/admin/AdminPriceSimulation'
 import AdminReports from '@/pages/admin/AdminReports'
 import AdminUsers from '@/pages/admin/AdminUsers'
 import AdminSettings from '@/pages/admin/AdminSettings'
+import AdminNcmImport from '@/pages/admin/AdminNcmImport'
 
 // Client pages
 import ClientDashboard from '@/pages/client/ClientDashboard'
@@ -75,6 +76,7 @@ export default function App() {
               <Route path="/admin/relatorios" element={<AdminReports />} />
               <Route path="/admin/usuarios" element={<AdminUsers />} />
               <Route path="/admin/configuracoes" element={<AdminSettings />} />
+              <Route path="/admin/importar-ncm" element={<AdminNcmImport />} />
             </Route>
 
             {/* Client portal */}

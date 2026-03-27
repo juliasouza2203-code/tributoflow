@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/integrations/supabase/client'
 import { useAuth } from '@/contexts/AuthContext'
@@ -11,20 +11,116 @@ import { Badge } from '@/components/ui/badge'
 import { formatCurrency, formatPercent } from '@/lib/utils'
 import { simulatePrice, DEFAULT_RATES } from '@/lib/tax-engine/ibs_cbs_calculator'
 import { toast } from 'sonner'
-import { Calculator, Download, TrendingUp, TrendingDown } from 'lucide-react'
+import { Calculator, Download, TrendingUp, TrendingDown, Layers, SplitSquareHorizontal } from 'lucide-react'
 import * as XLSX from 'xlsx'
 
+// ─── cClassTrib reduction mapping ────────────────────────────────────────────
+const REDUCTIONS: Record<string, { ibs: number; cbs: number }> = {
+  '01': { ibs: 0,   cbs: 0   },
+  '02': { ibs: 0.6, cbs: 0.6 },
+  '03': { ibs: 1,   cbs: 1   },
+  '04': { ibs: 0.3, cbs: 0.3 },
+  '05': { ibs: 0.4, cbs: 0.4 },
+  '06': { ibs: 1,   cbs: 1   },
+  '07': { ibs: 0,   cbs: 0   },
+}
+
+// ─── Reverse calculator helpers ───────────────────────────────────────────────
+
+interface DesmembramentoResult {
+  netPrice: number
+  cbsAmount: number
+  ibsAmount: number
+  totalTax: number
+  effectiveBurdenPct: number
+  ivaEffective: number
+}
+
+function calcDesmembramento(
+  grossPrice: number,
+  cbsRate: number,   // alíquota CBS %
+  ibsRate: number,   // alíquota IBS %
+  redCbs: number,    // redução CBS % (0-100)
+  redIbs: number,    // redução IBS % (0-100)
+): DesmembramentoResult {
+  if (grossPrice <= 0) {
+    return { netPrice: 0, cbsAmount: 0, ibsAmount: 0, totalTax: 0, effectiveBurdenPct: 0, ivaEffective: 0 }
+  }
+
+  // Effective rates after reductions (as decimals)
+  const cbsEffective = (cbsRate / 100) * (1 - redCbs / 100)
+  const ibsEffective = (ibsRate / 100) * (1 - redIbs / 100)
+  const ivaEffective = cbsEffective + ibsEffective
+
+  const netPrice   = grossPrice * (1 - ivaEffective)
+  const cbsAmount  = grossPrice * cbsEffective
+  const ibsAmount  = grossPrice * ibsEffective
+  const totalTax   = cbsAmount + ibsAmount
+  const effectiveBurdenPct = ivaEffective * 100
+
+  return {
+    netPrice: round2(netPrice),
+    cbsAmount: round2(cbsAmount),
+    ibsAmount: round2(ibsAmount),
+    totalTax: round2(totalTax),
+    effectiveBurdenPct: round2(effectiveBurdenPct),
+    ivaEffective,
+  }
+}
+
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+
+// ─── Small result card ────────────────────────────────────────────────────────
+function ResultCard({
+  label,
+  value,
+  sub,
+  highlight,
+}: {
+  label: string
+  value: string
+  sub?: string
+  highlight?: boolean
+}) {
+  return (
+    <div className={`rounded-xl border p-4 ${highlight ? 'bg-blue-50 border-blue-200' : 'bg-white border-gray-200'} shadow-sm`}>
+      <p className="text-xs text-gray-500 mb-1">{label}</p>
+      <p className={`text-xl font-bold ${highlight ? 'text-blue-700' : 'text-gray-900'}`}>{value}</p>
+      {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 export default function AdminPriceSimulation() {
   const { officeId, user } = useAuth()
   const qc = useQueryClient()
+
+  // ── Shared state ──────────────────────────────────────────────────────────
+  const [activeTab, setActiveTab] = useState<'formacao' | 'desmembramento'>('formacao')
   const [filterCompany, setFilterCompany] = useState('all')
+
+  // ── Formação de Preço state ───────────────────────────────────────────────
   const [legacyRate, setLegacyRate] = useState(27.65)
   const [targetMargin, setTargetMargin] = useState(30)
 
+  // ── Desmembramento state ──────────────────────────────────────────────────
+  const [grossInput, setGrossInput] = useState<string>('1000')
+  const [dmCbsRate, setDmCbsRate] = useState<string>('8.8')
+  const [dmIbsRate, setDmIbsRate] = useState<string>('17.7')
+  const [dmRedCbs, setDmRedCbs] = useState<string>('0')
+  const [dmRedIbs, setDmRedIbs] = useState<string>('0')
+
+  // ── Data queries ──────────────────────────────────────────────────────────
   const { data: companies } = useQuery({
     queryKey: ['companies', officeId],
     queryFn: async () => {
-      const { data } = await supabase.from('client_companies').select('id, legal_name, trade_name').eq('office_id', officeId!)
+      const { data } = await supabase
+        .from('client_companies')
+        .select('id, legal_name, trade_name')
+        .eq('office_id', officeId!)
       return data || []
     },
     enabled: !!officeId,
@@ -46,17 +142,7 @@ export default function AdminPriceSimulation() {
     enabled: !!officeId,
   })
 
-  // cClassTrib reduction mapping (demo data)
-  const REDUCTIONS: Record<string, { ibs: number; cbs: number }> = {
-    '01': { ibs: 0, cbs: 0 },
-    '02': { ibs: 0.6, cbs: 0.6 },
-    '03': { ibs: 1, cbs: 1 },
-    '04': { ibs: 0.3, cbs: 0.3 },
-    '05': { ibs: 0.4, cbs: 0.4 },
-    '06': { ibs: 1, cbs: 1 },
-    '07': { ibs: 0, cbs: 0 },
-  }
-
+  // ── Formação de Preço simulations ─────────────────────────────────────────
   const simulations = (classifiedItems || []).map(item => {
     const classif = (item as any).item_classifications?.[0]
     const cc = classif?.cclasstrib_code || '01'
@@ -81,6 +167,33 @@ export default function AdminPriceSimulation() {
     depois: parseFloat(s.result.tax_rate_after_pct.toFixed(2)),
   }))
 
+  // ── Desmembramento computed values ────────────────────────────────────────
+  const dmResult = useMemo(() => {
+    const gp  = parseFloat(grossInput) || 0
+    const cbs = parseFloat(dmCbsRate)  || 0
+    const ibs = parseFloat(dmIbsRate)  || 0
+    const rc  = parseFloat(dmRedCbs)   || 0
+    const ri  = parseFloat(dmRedIbs)   || 0
+    return calcDesmembramento(gp, cbs, ibs, rc, ri)
+  }, [grossInput, dmCbsRate, dmIbsRate, dmRedCbs, dmRedIbs])
+
+  // Per-item desmembramento (uses base_cost as "gross price" and rates from cClassTrib)
+  const dmSimulations = (classifiedItems || []).map(item => {
+    const classif = (item as any).item_classifications?.[0]
+    const cc = classif?.cclasstrib_code || '01'
+    const reduction = REDUCTIONS[cc] || { ibs: 0, cbs: 0 }
+    const ibsTotalRate = DEFAULT_RATES.ibs_state + DEFAULT_RATES.ibs_mun
+    const dm = calcDesmembramento(
+      item.base_cost || 0,
+      DEFAULT_RATES.cbs,
+      ibsTotalRate,
+      reduction.cbs * 100,
+      reduction.ibs * 100,
+    )
+    return { item, classif, dm }
+  })
+
+  // ── Mutations / exports ───────────────────────────────────────────────────
   const saveMutation = useMutation({
     mutationFn: async () => {
       const scenarios = simulations.map(s => ({
@@ -104,135 +217,383 @@ export default function AdminPriceSimulation() {
   })
 
   function exportXLSX() {
-    const rows = simulations.map(s => ({
-      'Descrição': s.item.description,
-      'NCM': s.item.ncm_current || '',
-      'cClassTrib': s.classif?.cclasstrib_code || '',
-      'Custo': s.item.base_cost,
-      'Preço Anterior': s.result.price_before.toFixed(2),
-      'Preço IBS/CBS': s.result.price_after.toFixed(2),
-      'Carga Anterior (R$)': s.result.tax_load_before.toFixed(2),
-      'Carga IBS/CBS (R$)': s.result.tax_load_after.toFixed(2),
-      'Variação Preço': ((s.result.price_after / s.result.price_before - 1) * 100).toFixed(2) + '%',
-    }))
-    const ws = XLSX.utils.json_to_sheet(rows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Simulação IBS/CBS')
-    XLSX.writeFile(wb, 'simulacao-ibscbs.xlsx')
+    if (activeTab === 'formacao') {
+      const rows = simulations.map(s => ({
+        'Descrição': s.item.description,
+        'NCM': s.item.ncm_current || '',
+        'cClassTrib': s.classif?.cclasstrib_code || '',
+        'Custo': s.item.base_cost,
+        'Preço Anterior': s.result.price_before.toFixed(2),
+        'Preço IBS/CBS': s.result.price_after.toFixed(2),
+        'Carga Anterior (R$)': s.result.tax_load_before.toFixed(2),
+        'Carga IBS/CBS (R$)': s.result.tax_load_after.toFixed(2),
+        'Variação Preço': ((s.result.price_after / s.result.price_before - 1) * 100).toFixed(2) + '%',
+      }))
+      const ws = XLSX.utils.json_to_sheet(rows)
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Simulação IBS/CBS')
+      XLSX.writeFile(wb, 'simulacao-ibscbs.xlsx')
+    } else {
+      const rows = dmSimulations.map(s => ({
+        'Descrição': s.item.description,
+        'NCM': s.item.ncm_current || '',
+        'cClassTrib': s.classif?.cclasstrib_code || '',
+        'Preço Bruto (com imposto)': s.item.base_cost,
+        'Preço Líquido s/ Imposto': s.dm.netPrice.toFixed(2),
+        'CBS (Federal)': s.dm.cbsAmount.toFixed(2),
+        'IBS (Est. + Mun.)': s.dm.ibsAmount.toFixed(2),
+        'Total Imposto': s.dm.totalTax.toFixed(2),
+        'Carga Efetiva (%)': s.dm.effectiveBurdenPct.toFixed(2) + '%',
+      }))
+      const ws = XLSX.utils.json_to_sheet(rows)
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Desmembramento IBS/CBS')
+      XLSX.writeFile(wb, 'desmembramento-ibscbs.xlsx')
+    }
     toast.success('Planilha exportada!')
   }
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
+
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Simulador de Preços IBS/CBS</h1>
           <p className="text-gray-500 text-sm mt-1">Calcule o impacto da reforma tributária nos preços</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={exportXLSX} className="gap-2" disabled={!simulations.length}>
+          <Button
+            variant="outline"
+            onClick={exportXLSX}
+            className="gap-2"
+            disabled={activeTab === 'formacao' ? !simulations.length : !dmSimulations.length}
+          >
             <Download className="h-4 w-4" /> Exportar
           </Button>
-          <Button onClick={() => saveMutation.mutate()} className="gap-2" disabled={!simulations.length || saveMutation.isPending}>
-            <Calculator className="h-4 w-4" /> {saveMutation.isPending ? 'Salvando...' : 'Salvar Cenário'}
-          </Button>
+          {activeTab === 'formacao' && (
+            <Button
+              onClick={() => saveMutation.mutate()}
+              className="gap-2"
+              disabled={!simulations.length || saveMutation.isPending}
+            >
+              <Calculator className="h-4 w-4" />
+              {saveMutation.isPending ? 'Salvando...' : 'Salvar Cenário'}
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Parameters */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Parâmetros da Simulação</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <Select value={filterCompany} onValueChange={setFilterCompany}>
-              <SelectTrigger><SelectValue placeholder="Empresa" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Todas</SelectItem>
-                {companies?.map(c => <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs">Carga Tributária Atual (%)</Label>
-            <Input type="number" value={legacyRate} onChange={e => setLegacyRate(+e.target.value)} min={0} max={100} step={0.01} />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs">Margem Alvo (%)</Label>
-            <Input type="number" value={targetMargin} onChange={e => setTargetMargin(+e.target.value)} min={0} max={100} step={0.5} />
-          </div>
-          <div className="flex items-end">
-            <div className="text-sm">
-              <p className="text-gray-500">IBS padrão: <span className="font-semibold text-gray-900">20%</span></p>
-              <p className="text-gray-500">CBS padrão: <span className="font-semibold text-gray-900">8,8%</span></p>
+      {/* Tab toggle */}
+      <div className="flex gap-1 bg-gray-100 rounded-xl p-1 w-fit">
+        <button
+          onClick={() => setActiveTab('formacao')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            activeTab === 'formacao'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Layers className="h-4 w-4" />
+          Formação de Preço
+        </button>
+        <button
+          onClick={() => setActiveTab('desmembramento')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            activeTab === 'desmembramento'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <SplitSquareHorizontal className="h-4 w-4" />
+          Desmembramento de Imposto
+        </button>
+      </div>
+
+      {/* ═══ TAB: FORMAÇÃO DE PREÇO ══════════════════════════════════════════ */}
+      {activeTab === 'formacao' && (
+        <>
+          {/* Parameters */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <h3 className="text-sm font-semibold text-gray-700 mb-4">Parâmetros da Simulação</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <Select value={filterCompany} onValueChange={setFilterCompany}>
+                  <SelectTrigger><SelectValue placeholder="Empresa" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todas</SelectItem>
+                    {companies?.map(c => (
+                      <SelectItem key={c.id} value={c.id}>{c.trade_name || c.legal_name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Carga Tributária Atual (%)</Label>
+                <Input
+                  type="number"
+                  value={legacyRate}
+                  onChange={e => setLegacyRate(+e.target.value)}
+                  min={0} max={100} step={0.01}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Margem Alvo (%)</Label>
+                <Input
+                  type="number"
+                  value={targetMargin}
+                  onChange={e => setTargetMargin(+e.target.value)}
+                  min={0} max={100} step={0.5}
+                />
+              </div>
+              <div className="flex items-end">
+                <div className="text-sm">
+                  <p className="text-gray-500">IBS padrão: <span className="font-semibold text-gray-900">20%</span></p>
+                  <p className="text-gray-500">CBS padrão: <span className="font-semibold text-gray-900">8,8%</span></p>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Chart */}
-      {chartData.length > 0 && (
-        <TaxImpactChart data={chartData} title="Comparativo de Carga Tributária por Item" />
+          {/* Chart */}
+          {chartData.length > 0 && (
+            <TaxImpactChart data={chartData} title="Comparativo de Carga Tributária por Item" />
+          )}
+
+          {/* Results table */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="p-5 border-b border-gray-200">
+              <h3 className="font-semibold text-gray-900">Resultado da Simulação</h3>
+              <p className="text-xs text-gray-400 mt-0.5">Apenas itens classificados com custo informado</p>
+            </div>
+            {isLoading ? (
+              <div className="p-6 space-y-3">
+                {[1, 2, 3].map(i => <div key={i} className="h-14 animate-pulse bg-gray-100 rounded-lg" />)}
+              </div>
+            ) : simulations.length === 0 ? (
+              <div className="py-16 text-center">
+                <Calculator className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500 text-sm">Nenhum item classificado com custo informado.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">Item</th>
+                      <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">cClassTrib</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Custo</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço Atual</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço IBS/CBS</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Variação</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Carga Nova</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {simulations.map(({ item, classif, result }) => {
+                      const variation = result.price_before > 0
+                        ? (result.price_after / result.price_before - 1) * 100
+                        : 0
+                      return (
+                        <tr key={item.id} className="hover:bg-gray-50">
+                          <td className="py-3 px-4">
+                            <p className="text-gray-900 font-medium truncate max-w-xs">{item.description}</p>
+                            <p className="text-xs font-mono text-gray-400">{item.ncm_current}</p>
+                          </td>
+                          <td className="py-3 px-4">
+                            <Badge variant="secondary" className="font-mono">
+                              {classif?.cclasstrib_code || '—'}
+                            </Badge>
+                          </td>
+                          <td className="py-3 px-4 text-right text-gray-600">{formatCurrency(item.base_cost || 0)}</td>
+                          <td className="py-3 px-4 text-right text-gray-700">{formatCurrency(result.price_before)}</td>
+                          <td className="py-3 px-4 text-right font-semibold text-gray-900">{formatCurrency(result.price_after)}</td>
+                          <td className="py-3 px-4 text-right">
+                            <span className={`flex items-center justify-end gap-1 text-xs font-medium ${variation >= 0 ? 'text-red-500' : 'text-green-600'}`}>
+                              {variation >= 0
+                                ? <TrendingUp className="h-3 w-3" />
+                                : <TrendingDown className="h-3 w-3" />}
+                              {formatPercent(Math.abs(variation))}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right text-gray-600">{formatPercent(result.tax_rate_after_pct)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
       )}
 
-      {/* Results table */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-200">
-          <h3 className="font-semibold text-gray-900">Resultado da Simulação</h3>
-          <p className="text-xs text-gray-400 mt-0.5">Apenas itens classificados com custo informado</p>
-        </div>
-        {isLoading ? (
-          <div className="p-6 space-y-3">
-            {[1,2,3].map(i => <div key={i} className="h-14 animate-pulse bg-gray-100 rounded-lg" />)}
+      {/* ═══ TAB: DESMEMBRAMENTO DE IMPOSTO ══════════════════════════════════ */}
+      {activeTab === 'desmembramento' && (
+        <>
+          {/* Manual calculator */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-5">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700">Calculadora Reversa — Preço Bruto com Imposto</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Informe o preço de venda já com CBS+IBS embutidos ("por dentro") e veja o desmembramento.
+              </p>
+            </div>
+
+            {/* Inputs */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div className="space-y-1 md:col-span-1">
+                <Label className="text-xs">Preço Bruto (com impostos) R$</Label>
+                <Input
+                  type="number"
+                  value={grossInput}
+                  onChange={e => setGrossInput(e.target.value)}
+                  min={0}
+                  step={0.01}
+                  placeholder="0,00"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Alíquota CBS %</Label>
+                <Input
+                  type="number"
+                  value={dmCbsRate}
+                  onChange={e => setDmCbsRate(e.target.value)}
+                  min={0} max={100} step={0.1}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Alíquota IBS %</Label>
+                <Input
+                  type="number"
+                  value={dmIbsRate}
+                  onChange={e => setDmIbsRate(e.target.value)}
+                  min={0} max={100} step={0.1}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Redução CBS %</Label>
+                <Input
+                  type="number"
+                  value={dmRedCbs}
+                  onChange={e => setDmRedCbs(e.target.value)}
+                  min={0} max={100} step={1}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Redução IBS %</Label>
+                <Input
+                  type="number"
+                  value={dmRedIbs}
+                  onChange={e => setDmRedIbs(e.target.value)}
+                  min={0} max={100} step={1}
+                />
+              </div>
+            </div>
+
+            {/* Result cards */}
+            {(parseFloat(grossInput) || 0) > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-1">
+                <ResultCard
+                  label="Preço Líquido (sem impostos)"
+                  value={formatCurrency(dmResult.netPrice)}
+                  sub="Valor que o vendedor recebe"
+                  highlight
+                />
+                <ResultCard
+                  label="CBS (Federal)"
+                  value={formatCurrency(dmResult.cbsAmount)}
+                  sub={`${formatPercent(parseFloat(dmCbsRate) * (1 - parseFloat(dmRedCbs || '0') / 100))} efetivo`}
+                />
+                <ResultCard
+                  label="IBS (Est. + Municipal)"
+                  value={formatCurrency(dmResult.ibsAmount)}
+                  sub={`${formatPercent(parseFloat(dmIbsRate) * (1 - parseFloat(dmRedIbs || '0') / 100))} efetivo`}
+                />
+                <ResultCard
+                  label="Total de Imposto"
+                  value={formatCurrency(dmResult.totalTax)}
+                />
+                <ResultCard
+                  label="Carga Efetiva"
+                  value={formatPercent(dmResult.effectiveBurdenPct)}
+                  sub="% sobre o preço bruto"
+                />
+              </div>
+            )}
+
+            {/* Formula note */}
+            <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 text-xs text-gray-500 space-y-0.5">
+              <p className="font-semibold text-gray-600 mb-1">Fórmulas aplicadas (LC 214/2025 — "por dentro")</p>
+              <p>cbsEfetivo = cbsAlíquota × (1 − redCBS / 100)</p>
+              <p>ibsEfetivo = ibsAlíquota × (1 − redIBS / 100)</p>
+              <p>ivaEfetivo = cbsEfetivo + ibsEfetivo</p>
+              <p>Preço Líquido = Preço Bruto × (1 − ivaEfetivo)</p>
+              <p>CBS = Preço Bruto × cbsEfetivo &nbsp;|&nbsp; IBS = Preço Bruto × ibsEfetivo</p>
+            </div>
           </div>
-        ) : simulations.length === 0 ? (
-          <div className="py-16 text-center">
-            <Calculator className="h-10 w-10 text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-500 text-sm">Nenhum item classificado com custo informado.</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">Item</th>
-                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">cClassTrib</th>
-                  <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Custo</th>
-                  <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço Atual</th>
-                  <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço IBS/CBS</th>
-                  <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Variação</th>
-                  <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Carga Nova</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {simulations.map(({ item, classif, result }) => {
-                  const variation = result.price_before > 0 ? (result.price_after / result.price_before - 1) * 100 : 0
-                  return (
-                    <tr key={item.id} className="hover:bg-gray-50">
-                      <td className="py-3 px-4">
-                        <p className="text-gray-900 font-medium truncate max-w-xs">{item.description}</p>
-                        <p className="text-xs font-mono text-gray-400">{item.ncm_current}</p>
-                      </td>
-                      <td className="py-3 px-4">
-                        <Badge variant="secondary" className="font-mono">{classif?.cclasstrib_code || '—'}</Badge>
-                      </td>
-                      <td className="py-3 px-4 text-right text-gray-600">{formatCurrency(item.base_cost || 0)}</td>
-                      <td className="py-3 px-4 text-right text-gray-700">{formatCurrency(result.price_before)}</td>
-                      <td className="py-3 px-4 text-right font-semibold text-gray-900">{formatCurrency(result.price_after)}</td>
-                      <td className="py-3 px-4 text-right">
-                        <span className={`flex items-center justify-end gap-1 text-xs font-medium ${variation >= 0 ? 'text-red-500' : 'text-green-600'}`}>
-                          {variation >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-                          {formatPercent(Math.abs(variation))}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right text-gray-600">{formatPercent(result.tax_rate_after_pct)}</td>
+
+          {/* Per-item desmembramento table */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="p-5 border-b border-gray-200">
+              <h3 className="font-semibold text-gray-900">Desmembramento por Item Classificado</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Custo informado tratado como preço bruto com IBS/CBS embutidos. Alíquotas da tabela padrão IBS {DEFAULT_RATES.ibs_state + DEFAULT_RATES.ibs_mun}% + CBS {DEFAULT_RATES.cbs}%.
+              </p>
+            </div>
+
+            {isLoading ? (
+              <div className="p-6 space-y-3">
+                {[1, 2, 3].map(i => <div key={i} className="h-14 animate-pulse bg-gray-100 rounded-lg" />)}
+              </div>
+            ) : dmSimulations.length === 0 ? (
+              <div className="py-16 text-center">
+                <SplitSquareHorizontal className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500 text-sm">Nenhum item classificado com custo informado.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">Item</th>
+                      <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase">cClassTrib</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço Bruto</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Preço Líq. s/ Imposto</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">CBS (Federal)</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">IBS (Est.+Mun.)</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Total Imposto</th>
+                      <th className="py-3 px-4 text-right text-xs font-semibold text-gray-500 uppercase">Carga Efetiva</th>
                     </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {dmSimulations.map(({ item, classif, dm }) => (
+                      <tr key={item.id} className="hover:bg-gray-50">
+                        <td className="py-3 px-4">
+                          <p className="text-gray-900 font-medium truncate max-w-xs">{item.description}</p>
+                          <p className="text-xs font-mono text-gray-400">{item.ncm_current}</p>
+                        </td>
+                        <td className="py-3 px-4">
+                          <Badge variant="secondary" className="font-mono">
+                            {classif?.cclasstrib_code || '—'}
+                          </Badge>
+                        </td>
+                        <td className="py-3 px-4 text-right text-gray-600">{formatCurrency(item.base_cost || 0)}</td>
+                        <td className="py-3 px-4 text-right font-semibold text-blue-700">{formatCurrency(dm.netPrice)}</td>
+                        <td className="py-3 px-4 text-right text-gray-600">{formatCurrency(dm.cbsAmount)}</td>
+                        <td className="py-3 px-4 text-right text-gray-600">{formatCurrency(dm.ibsAmount)}</td>
+                        <td className="py-3 px-4 text-right text-red-600 font-medium">{formatCurrency(dm.totalTax)}</td>
+                        <td className="py-3 px-4 text-right text-gray-600">{formatPercent(dm.effectiveBurdenPct)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   )
 }
