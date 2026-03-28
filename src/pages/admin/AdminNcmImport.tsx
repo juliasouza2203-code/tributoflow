@@ -128,20 +128,28 @@ async function classifyCClassTrib(
     p_red_cbs: c.p_red_cbs,
   }))
 
+  // Call Edge Function directly via fetch (bypasses supabase.functions.invoke
+  // which sends the user's session JWT — the gateway rejects it for Edge Functions).
+  const EDGE_URL = 'https://egwnftrxaaouvtsbcssf.supabase.co/functions/v1/classify-cclasstrib'
+  const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnd25mdHJ4YWFvdXZ0c2Jjc3NmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzOTY4MTAsImV4cCI6MjA4OTk3MjgxMH0.RATvNbBSsIY6cbi6Rd86NDjUcCad5HjSccGNw8-3NH4'
+
   try {
-    const { data, error } = await supabase.functions.invoke('classify-cclasstrib', {
-      body: { description, ncmCode, candidates },
+    const response = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ANON_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ description, ncmCode, candidates }),
     })
 
-    // Surface the real error for debugging
-    if (error) {
-      console.error('[classify-cclasstrib] invoke error:', error)
-      throw new Error(`FnError: ${error.message || JSON.stringify(error)}`)
+    if (!response.ok) {
+      const errBody = await response.text()
+      throw new Error(`HTTP ${response.status}: ${errBody}`)
     }
-    if (!data?.code) {
-      console.error('[classify-cclasstrib] empty response:', data)
-      throw new Error(`EmptyResponse: ${JSON.stringify(data)}`)
-    }
+
+    const data = await response.json()
+    if (!data?.code) throw new Error(`Empty response: ${JSON.stringify(data)}`)
 
     return {
       cClassTrib: data.code,
@@ -157,7 +165,7 @@ async function classifyCClassTrib(
     }
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err)
-    console.error('[classify-cclasstrib] caught:', errMsg)
+    console.error('[classify-cclasstrib]', errMsg)
     const fallback = candidates.find(c => c.code === '000001') || candidates[0]
     return {
       cClassTrib: fallback?.code || '',
@@ -167,7 +175,7 @@ async function classifyCClassTrib(
       pRedIbs: fallback?.p_red_ibs || 0,
       pRedCbs: fallback?.p_red_cbs || 0,
       confidence: 'low',
-      reasoning: `[DEBUG] ${errMsg}`,
+      reasoning: `Erro: ${errMsg}`,
       usedAI: false,
       fromCache: false,
     }
