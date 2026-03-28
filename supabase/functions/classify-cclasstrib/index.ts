@@ -135,38 +135,53 @@ Deno.serve(async (req) => {
       )
     }
 
-    // 3. Build prompt — list up to 80 most relevant candidates to keep token count manageable
+    // 3. Build prompt with ALL candidates + NCM chapter context
     const anthropic = new Anthropic({ apiKey: anthropicKey })
 
-    const candidateList = (hasCandidates ? candidates.slice(0, 80) : [])
+    const candidateList = (hasCandidates ? candidates : [])
       .map((c, i) =>
-        `${i + 1}. Código: ${c.code} | CST: ${c.cst} | Regime: ${c.regime} | Red.IBS: ${c.p_red_ibs}% | Red.CBS: ${c.p_red_cbs}% | Descrição: ${c.description}`
+        `${i + 1}. ${c.code} (CST ${c.cst}) — ${c.description}${c.p_red_ibs > 0 ? ` [Red.IBS ${c.p_red_ibs}% / Red.CBS ${c.p_red_cbs}%]` : ''}`
       )
       .join('\n')
 
-    const prompt = `Você é um especialista em tributação brasileira conforme a Lei Complementar 214/2025 (reforma tributária IBS/CBS).
+    // Derive NCM chapter for contextual hints
+    const ncmChapter = ncmCode.substring(0, 2)
 
-Dado o produto com NCM ${ncmCode} e descrição: "${description}"
+    const prompt = `Você é o maior especialista em tributação brasileira da LC 214/2025 (reforma tributária IBS/CBS).
+Você tem conhecimento profundo de TODOS os Anexos da LC 214/2025.
 
-Escolha o cClassTrib (Classe Tributária IBS/CBS) mais adequado da lista abaixo:
+PRODUTO A CLASSIFICAR:
+- NCM: ${ncmCode} (Capítulo ${ncmChapter})
+- Descrição: "${description}"
 
+REFERÊNCIA RÁPIDA DE ANEXOS DA LC 214/2025:
+- Anexo I (art. 127): Cesta Básica Nacional — alíquota ZERO (100% redução) — arroz, feijão, farinha de mandioca, pão, leite, café, açúcar, óleo de soja, banana, batata, etc.
+- Anexo IV (art. 133): Medicamentos registrados na Anvisa — 60% redução
+- Anexo V (art. 133 §3): Medicamentos com alíquota ZERO (100% redução) — oncológicos, HIV, diabetes, etc.
+- Anexo VI (art. 134): Dispositivos médicos e de acessibilidade — 60% redução
+- Anexo VII (art. 136): Serviços de saúde — 60% redução
+- Anexo VIII (art. 137): Alimentos para consumo humano (não cesta básica) — 60% redução — inclui carnes, peixes, produtos de panificação, massas, óleos vegetais, conservas, sucos, etc.
+- Anexo IX (art. 138): INSUMOS AGROPECUÁRIOS E AQUÍCOLAS — 60% redução — INCLUI: fertilizantes, defensivos agrícolas, INSETICIDAS, FUNGICIDAS, HERBICIDAS, sementes, mudas, rações animais, vacinas veterinárias, máquinas agrícolas, tratores, implementos agrícolas, NCMs dos capítulos 31, 38 (defensivos/pesticidas), 12 (sementes), 23 (rações), 84 (máquinas agrícolas), 87 (tratores)
+- Anexo X (art. 139): Produtos de higiene pessoal e limpeza — 60% redução — sabonete, pasta de dente, papel higiênico, água sanitária, detergente
+- Anexo XI (art. 140): Serviços de educação — 60% redução
+- Anexo XVII (art. 434): Bens e serviços com alíquota fixa (cigarros, bebidas alcoólicas)
+- Combustíveis: tributação monofásica (CST 620)
+- Exportações: imunidade (CST 410)
+
+REGRA FUNDAMENTAL: NÃO escolha 000001 (tributação integral) se o produto se encaixa em qualquer Anexo acima. 000001 é APENAS para produtos que não têm NENHUM benefício fiscal na LC 214/2025.
+
+LISTA COMPLETA DE cClassTrib DISPONÍVEIS:
 ${candidateList}
 
-Retorne SOMENTE um JSON válido, sem texto adicional:
-{"code": "XXXXXX", "cstCode": "XXX", "description": "descrição do cClassTrib escolhido", "regime": "regime tributário", "pRedIbs": 0.0, "pRedCbs": 0.0, "confidence": "high|medium|low|none", "reasoning": "explicação breve em português"}
+Responda SOMENTE com JSON válido:
+{"code": "XXXXXX", "confidence": "high|medium|low", "reasoning": "justificativa citando o Anexo e artigo da LC 214/2025"}
 
-Regras:
-- "code": código de 6 dígitos do cClassTrib escolhido (exatamente como na lista)
-- "cstCode": código CST de 3 dígitos correspondente
-- "description": descrição do cClassTrib conforme a lista
-- "regime": regime tributário (ex: "Tributação Normal", "Redução de Alíquota", "Isenção", etc.)
-- "pRedIbs": percentual de redução IBS (número decimal, ex: 60.0)
-- "pRedCbs": percentual de redução CBS (número decimal, ex: 60.0)
-- "confidence": high = certeza, medium = provável, low = possível, none = não determinado
-- "reasoning": máximo 100 palavras explicando a escolha com base na LC 214/2025`
+- "code": exatamente 6 dígitos da lista acima
+- "confidence": high = certeza do Anexo, medium = provável, low = incerto
+- "reasoning": cite o Anexo e artigo específico, máximo 120 palavras`
 
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     })
