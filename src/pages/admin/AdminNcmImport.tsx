@@ -132,7 +132,17 @@ async function classifyCClassTrib(
     const { data, error } = await supabase.functions.invoke('classify-cclasstrib', {
       body: { description, ncmCode, candidates },
     })
-    if (error || !data?.code) throw new Error(error?.message || 'No result from Edge Function')
+
+    // Surface the real error for debugging
+    if (error) {
+      console.error('[classify-cclasstrib] invoke error:', error)
+      throw new Error(`FnError: ${error.message || JSON.stringify(error)}`)
+    }
+    if (!data?.code) {
+      console.error('[classify-cclasstrib] empty response:', data)
+      throw new Error(`EmptyResponse: ${JSON.stringify(data)}`)
+    }
+
     return {
       cClassTrib: data.code,
       cClassTribDesc: data.description || '',
@@ -145,8 +155,9 @@ async function classifyCClassTrib(
       usedAI: true,
       fromCache: data.fromCache || false,
     }
-  } catch {
-    // Fallback: código 000001 = tributação normal, ou o primeiro da lista
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error('[classify-cclasstrib] caught:', errMsg)
     const fallback = candidates.find(c => c.code === '000001') || candidates[0]
     return {
       cClassTrib: fallback?.code || '',
@@ -156,7 +167,7 @@ async function classifyCClassTrib(
       pRedIbs: fallback?.p_red_ibs || 0,
       pRedCbs: fallback?.p_red_cbs || 0,
       confidence: 'low',
-      reasoning: 'Classificação automática indisponível. Verificar manualmente.',
+      reasoning: `[DEBUG] ${errMsg}`,
       usedAI: false,
       fromCache: false,
     }
