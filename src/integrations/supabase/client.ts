@@ -1,7 +1,13 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string) || 'https://egwnftrxaaouvtsbcssf.supabase.co'
+
+// Legacy JWT anon key required for Edge Functions — the publishable key format (sb_publishable_*)
+// does not work as Bearer token for Supabase Edge Functions (returns 401).
+const RAW_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const supabaseKey = RAW_KEY?.startsWith('sb_')
+  ? 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnd25mdHJ4YWFvdXZ0c2Jjc3NmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzOTY4MTAsImV4cCI6MjA4OTk3MjgxMH0.RATvNbBSsIY6cbi6Rd86NDjUcCad5HjSccGNw8-3NH4'
+  : RAW_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnd25mdHJ4YWFvdXZ0c2Jjc3NmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzOTY4MTAsImV4cCI6MjA4OTk3MjgxMH0.RATvNbBSsIY6cbi6Rd86NDjUcCad5HjSccGNw8-3NH4'
 
 if (!supabaseUrl || !supabaseKey) {
   document.body.innerHTML = `
